@@ -2,7 +2,7 @@
 
 **Open-source XAS preprocessing and visualization toolkit originally developed for ASTRA beamline `.xasd` data at the SOLARIS Synchrotron.**
 
-AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) preprocessing, including foil drift correction, replicate alignment, scan merging, Athena-style normalization, and interactive spectrum visualization. Although originally developed around the ASTRA beamline at the SOLARIS Synchrotron, the processing workflow is adaptable to other XAS beamlines provided that compatible detector channels and energy-resolved scan formats are available.
+AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) preprocessing, including foil drift correction, optional deglitching, replicate alignment, scan merging, Athena-style normalization, and interactive spectrum visualization. Although originally developed around the ASTRA beamline at the SOLARIS Synchrotron, the processing workflow is adaptable to other XAS beamlines provided that compatible detector channels and energy-resolved scan formats are available.
 
 ---
 
@@ -13,10 +13,11 @@ AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) pr
 - **Athena-compatible normalization** — uses Larch's `pre_edge` with full control over pre-edge range, normalization range, polynomial order, and E₀
 - **Three analysis modes** — fluorescence (`IF/I0`), transmission (`ln(I0/I1)`), and reference (`ln(I1/I2)`)
 - **Two alignment sources** — inline reference channel (I₂ measured in every scan) or separate foil files identified by a filename keyword
+- **Pre-merge deglitching** — optional automatic interpolation of narrow detector spikes and manual range interpolation for broader inspected artifacts
 - **Automatic outlier detection** — optionally flag and exclude replicates that deviate from the group mean by a configurable RMS threshold
 - **Shift rejection** — optionally exclude replicates whose energy shift exceeds a threshold before merging
 - **Detector raw export** — saves all raw detector channels (I0, I1, I2, IF, FDT, Ir) alongside processed outputs, plottable directly in the Spectrum Viewer
-- **Automatic plots** — overview plots for raw μ(E), background-corrected, and normalized spectra; per-group replicate QC plots
+- **Automatic plots** — overview plots for processed μ(E), background-corrected, and normalized spectra; per-group replicate QC plots
 - **Interactive Spectrum Viewer** — compare any `.dat` files side by side with Savitzky-Golay smoothing, raw/smoothed overlay, legend toggling, click-to-read energy values, and publication-ready figure export
 - **JSON config system** — save and load processing parameters per edge or experiment type
 - **CLI and Python API** — run headless from the command line or call `process_folder()` from a script
@@ -108,13 +109,14 @@ print(result["output_dir"])
     ├─ Load detector channels (E, I0, I1, I2, IF, FDT, Ir)
     ├─ Compute μ(E) per scan (IF/I0, ln(I0/I1), or ln(I1/I2))
     ├─ Align each scan to foil reference via derivative cross-correlation
+    ├─ [Optional] Deglitch aligned replicates before merging
     ├─ [Optional] Reject outlier replicates
     │
     ├─ Average aligned μ(E) replicates  ← merge first
     ├─ Run Larch pre_edge on merged spectrum  ← normalize once
     │
     └─ Output
-         ├─ <sample>_raw.dat         (merged μ(E))
+         ├─ <sample>_processed.dat   (merged processed μ(E))
          ├─ <sample>_bkgcorr.dat     (background-subtracted)
          ├─ <sample>_norm.dat        (normalized μ(E))
          ├─ <sample>_flat.dat        (flattened normalized μ(E))
@@ -122,6 +124,59 @@ print(result["output_dir"])
          ├─ plots/                   (overview and QC plots)
          └─ ASTRA_processing_report.txt
 ```
+
+---
+
+## Deglitching
+
+AstraXAS includes optional deglitching for scan-level artifacts. Deglitching operates on each aligned replicate before replicate averaging. The merge-then-normalize workflow is preserved: corrected μ(E) replicates are merged first, and Larch `pre_edge` normalization is applied once to the merged spectrum.
+
+Two deglitching modes are available:
+
+- **Automatic deglitching** interpolates isolated, narrow point-like detector spikes. It preserves the original energy grid and is intended for single-point excursions, not structured spectral features.
+- **Manual range deglitching** interpolates a user-defined energy interval from neighboring points. It is intended for broader artifacts selected after visual inspection.
+
+Automatic deglitching should be used conservatively. Broad artifacts, beamline disturbances, or multi-point distortions should be handled with manual range interpolation.
+
+GUI usage:
+
+1. Enable **Deglitching**.
+2. Choose `automatic`, `manual`, or `both`.
+3. For automatic deglitching, set the threshold, window half-width, and optional energy bounds.
+4. For manual range deglitching, set the artifact energy range and the number of margin points used for interpolation.
+
+Python examples:
+
+```python
+from astra_xas import AstraConfig, process_folder
+
+# Automatic: narrow detector spikes only
+config = AstraConfig(
+    enable_auto_deglitch=True,
+    deglitch_threshold=5.0,
+    deglitch_window=5,
+    deglitch_min_energy=7100.0,
+    deglitch_max_energy=7160.0,
+)
+
+process_folder("/path/to/xasd/folder", config=config)
+```
+
+```python
+from astra_xas import AstraConfig, process_folder
+
+# Manual range: broader artifact selected after inspection
+config = AstraConfig(
+    enable_manual_deglitch_range=True,
+    manual_deglitch_min_energy=7132.0,
+    manual_deglitch_max_energy=7135.0,
+    manual_deglitch_margin_points=5,
+)
+
+process_folder("/path/to/xasd/folder", config=config)
+```
+
+When deglitching changes points, AstraXAS writes a per-group `<sample>_deglitch_log.dat`. `ASTRA_processing_report.txt` summarizes automatic and manual deglitched point counts separately.
 
 ---
 
@@ -145,15 +200,17 @@ For each sample group, AstraXAS writes the following to the output directory:
 
 | File | Contents |
 |---|---|
-| `<sample>_raw.dat` | Merged μ(E) before background removal |
+| `<sample>_processed.dat` | Merged processed μ(E) before background removal |
 | `<sample>_bkgcorr.dat` | Background-corrected μ(E) |
 | `<sample>_norm.dat` | Normalized μ(E) |
 | `<sample>_flat.dat` | Flattened normalized μ(E) |
 | `detector_raw/<scan>.dat` | Raw detector channels for every individual scan |
-| `plots/<sample>_qc.png` | Replicate overlay QC plot |
-| `plots/overview_norm.png` | All normalized spectra overlaid |
-| `plots/overview_processed.png` | All merged μ(E) spectra overlaid |
-| `ASTRA_processing_report.txt` | Full parameter log and per-group summary |
+| `plots/replicate_qc/<sample>_replicate_qc.png` | Replicate overlay QC plot |
+| `plots/processed_mu_overview.png` | All merged processed μ(E) spectra overlaid |
+| `plots/background_corrected_overview.png` | All background-corrected spectra overlaid |
+| `plots/normalized_overview.png` | All normalized spectra overlaid |
+| `<sample>_deglitch_log.dat` | Deglitch point log, written only when deglitching modifies points |
+| `ASTRA_processing_report.txt` | Full parameter log, per-group summary, and deglitch point counts |
 | `ASTRA_normalization_summary.dat` | Edge step, E₀, and normalization metadata per group |
 | `ASTRA_group_summary.dat` | Sample names, foil assignments, replicate counts |
 
@@ -193,10 +250,19 @@ All processing parameters are exposed in the GUI and saveable as JSON config fil
 | `align_window_min/max` | Energy window used for foil alignment |
 | `shift_bound_min/max` | Maximum allowed energy shift during alignment (eV) |
 | `fluo_multiplicative_constant` | Scaling factor applied to IF before computing μ(E) |
+| `enable_auto_deglitch` | Interpolate isolated narrow detector spikes before merging |
+| `deglitch_threshold` | Robust local threshold for automatic spike detection |
+| `deglitch_window` | Local half-window used by automatic deglitching |
+| `deglitch_min_energy/max_energy` | Optional energy bounds for automatic deglitching |
+| `enable_manual_deglitch_range` | Interpolate a specified energy range before merging |
+| `manual_deglitch_min_energy/max_energy` | Energy interval for manual range interpolation |
+| `manual_deglitch_margin_points` | Neighboring points used to interpolate the manual range |
 | `enable_auto_outlier_detection` | Flag replicates that deviate from the group mean |
 | `outlier_rms_threshold` | RMS deviation threshold for outlier detection |
 | `enable_shift_rejection` | Exclude replicates with large energy shifts |
 | `reject_shift_abs_eV` | Shift threshold for rejection (eV) |
+
+In the GUI, the **Enable deglitching** checkbox and `automatic` / `manual` / `both` mode selector are translated into `enable_auto_deglitch` and `enable_manual_deglitch_range` in the saved configuration.
 
 Save a config file for each edge (Fe K, Cu K, etc.) and load it at the start of a session.
 
@@ -208,6 +274,7 @@ Save a config file for each edge (Fe K, Cu K, etc.) and load it at the start of 
 |---|---|---|---|
 | Automatic foil drift correction | Manual | Manual | ✅ Automatic |
 | Merge-then-normalize workflow | Manual | Manual | ✅ Default workflow |
+| Pre-merge deglitching | Manual | Manual | ✅ Automatic or manual range |
 | Detector raw channel plotting | ✗ | ✗ | ✅ Built-in |
 | Replicate QC plots | Manual | ✗ | ✅ Automatic |
 | Outlier / shift rejection | ✗ | ✗ | ✅ Configurable |
