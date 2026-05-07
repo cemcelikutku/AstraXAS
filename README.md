@@ -142,6 +142,8 @@ AstraXAS supports two alignment sources:
 - `inline_ref` uses the reference channel (`ln(I1/I2)`) measured in each sample scan. The first sample scan is the zero-shift reference.
 - `separate_foil` uses files whose names contain `foil_keyword` as reference foil scans. The first foil scan is the zero-shift reference, and each sample inherits the shift and quality of its most recent assigned foil scan.
 
+By default, `alignment_anchor_mode="first_scan"` preserves this behavior. To compare multiple folders against the same internal reference, set `alignment_anchor_mode="selected_file"` and provide `alignment_anchor_path` pointing to a `.xasd` scan. The selected anchor file is loaded, validated, and used as the zero-shift alignment anchor for all scans in the folder. This separates the alignment source (`inline_ref` or `separate_foil`) from the alignment anchor (the file that defines zero shift).
+
 Alignment is performed in the configured energy window (`align_window_min/max`) and bounded by `shift_bound_min/max`. The current engine sanitizes non-finite points, sorts spectra by energy, removes duplicate moving-spectrum energies, checks that the reference has usable derivative amplitude, then searches for the best shift using a coarse grid followed by local optimization. The moving spectrum is interpolated with a cubic spline before derivative comparison.
 
 Each computed alignment writes:
@@ -153,6 +155,8 @@ Each computed alignment writes:
 If alignment cannot be evaluated because the reference or moving spectrum is unusable, AstraXAS sets `shift_eV = 0.0`, `fit_error = NaN`, and `alignment_quality = 0.0`, then records an explicit warning.
 
 Set `save_drift_plot=True` to write `plots/overview/drift_tracker.png`. Reliable scans are shown as filled blue circles, while low-quality scans are shown as open red circles. Red dashed horizontal lines mark `±warn_shift_abs_eV`.
+
+The processing report and alignment shift tables record alignment source, alignment signal, alignment anchor mode, selected anchor file if any, whether the anchor loaded successfully, and the shift sign convention. A selected anchor provides a shared internal energy reference; it does not guarantee absolute energy calibration unless the anchor itself was externally calibrated.
 
 ---
 
@@ -304,13 +308,15 @@ For each sample group, AstraXAS writes the following to the output directory:
 | `plots/overview/normalized_overview.png` | All normalized spectra overlaid |
 | `plots/overview/drift_tracker.png` | Optional scan-by-scan energy shift plot, written when `save_drift_plot=True` |
 | `<sample>_deglitch_log.dat` | Deglitch point log, written only when deglitching modifies points |
-| `ASTRA_processing_report.txt` | Full parameter log, validation warnings, per-group summary, low-quality alignment count, warnings, and deglitch point counts |
-| `ASTRA_energy_shifts.dat` | Per-sample shift table: filename, base name, replicate id, assigned foil/reference, shift, alignment quality |
-| `ASTRA_foil_alignment.dat` | Per-foil or inline-reference alignment table: filename, shift, fit error, alignment quality |
+| `ASTRA_processing_report.txt` | Full parameter log, validation warnings, processing warnings, plot file lists, replicate QC counts, per-group summary, low-quality alignment count, and deglitch point counts |
+| `ASTRA_energy_shifts.dat` | Per-sample shift table with alignment-anchor metadata: filename, base name, replicate id, assigned foil/reference, shift, alignment quality |
+| `ASTRA_foil_alignment.dat` | Per-foil or inline-reference alignment table with alignment-anchor metadata: filename, shift, fit error, alignment quality |
 | `ASTRA_normalization_summary.dat` | Edge step, E₀, and normalization metadata per group |
 | `ASTRA_group_summary.dat` | Sample names, foil assignments, replicate counts |
 
-All `.dat` files have a commented header listing parameters and column names, and spectral `.dat` files are directly loadable in the Spectrum Viewer.
+All `.dat` files have a commented header listing parameters and column names, and spectral `.dat` files are directly loadable in the Spectrum Viewer. `ASTRA_energy_shifts.dat` and `ASTRA_foil_alignment.dat` include the alignment anchor context so shifts can be interpreted across folders.
+
+`ASTRA_processing_report.txt` separates `Validation warnings` from `Processing warnings`, reports processed μ(E) replicate QC and normalized replicate QC counts separately, and lists created plots under `Overview plots created` and `Replicate QC plots created`.
 
 Note: `plots/detector_raw_overview.png` was the former name for the aligned averaged IF overview. Current runs write only `plots/overview/aligned_averaged_IF_overview.png`. The normalized replicate QC plot was formerly named `<sample>_replicate_qc.png`; current runs write `<sample>_normalized_replicate_qc.png`.
 
@@ -345,6 +351,9 @@ All processing parameters are exposed in the GUI and saveable as JSON config fil
 | `pre1`, `pre2` | Pre-edge fit range relative to E₀ (eV) |
 | `norm1`, `norm2` | Post-edge normalization range relative to E₀ (eV) |
 | `nnorm` | Normalization polynomial order (0, 1, or 2) |
+| `alignment_source` | Alignment strategy: `inline_ref` or `separate_foil` |
+| `alignment_anchor_mode` | Zero-shift anchor selection: `first_scan` or `selected_file` |
+| `alignment_anchor_path` | Path to selected `.xasd` anchor file when `alignment_anchor_mode="selected_file"` |
 | `align_window_min/max` | Energy window used for foil alignment |
 | `shift_bound_min/max` | Maximum allowed energy shift during alignment (eV) |
 | `alignment_quality_warn_threshold` | Quality threshold below which alignment warnings are emitted; default `0.7` |

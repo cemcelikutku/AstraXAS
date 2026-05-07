@@ -7,6 +7,8 @@ class AstraConfig:
     foil_keyword: str = "foil"
     analysis_mode: str = "fluo"      # fluo, trans, ref
     alignment_source: str = "separate_foil"  # separate_foil, inline_ref
+    alignment_anchor_mode: str = "first_scan"  # first_scan, selected_file
+    alignment_anchor_path: str | None = None
     foil_alignment_mode: str = "trans"  # trans, ref, fluo
     fluo_multiplicative_constant: float = 1e-11
 

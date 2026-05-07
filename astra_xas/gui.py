@@ -14,6 +14,13 @@ from .processor import process_folder
 from .spectrum_viewer import open_spectrum_viewer
 
 
+ALIGNMENT_ANCHOR_MODE_LABELS = {
+    "first_scan": "first scan automatically",
+    "selected_file": "selected scan file",
+}
+ALIGNMENT_ANCHOR_MODE_VALUES = {label: value for value, label in ALIGNMENT_ANCHOR_MODE_LABELS.items()}
+
+
 class AstraGui(tk.Tk):
     """Tkinter interface for ASTRA XAS Processor."""
 
@@ -28,6 +35,8 @@ class AstraGui(tk.Tk):
         self.output_dir = tk.StringVar()
         self.analysis_mode = tk.StringVar(value="fluo")
         self.alignment_source = tk.StringVar(value="inline_ref")
+        self.alignment_anchor_mode = tk.StringVar(value=ALIGNMENT_ANCHOR_MODE_LABELS["first_scan"])
+        self.alignment_anchor_path = tk.StringVar(value="")
         self.foil_mode = tk.StringVar(value="trans")
         self.foil_keyword = tk.StringVar(value="foil")
         self.e0 = tk.StringVar(value="7121.030")
@@ -80,9 +89,11 @@ class AstraGui(tk.Tk):
         self._deglitch_mode_widgets = []
         self._build()
         self.alignment_source.trace_add("write", self._update_alignment_ui)
+        self.alignment_anchor_mode.trace_add("write", self._update_alignment_anchor_ui)
         self.enable_deglitching.trace_add("write", self._update_deglitch_ui)
         self.deglitch_mode.trace_add("write", self._update_deglitch_ui)
         self._update_alignment_ui()
+        self._update_alignment_anchor_ui()
         self._update_deglitch_ui()
         self.after(100, self._drain_log_queue)
 
@@ -219,29 +230,48 @@ class AstraGui(tk.Tk):
             state="readonly",
         ).grid(row=1, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frame, text="Foil alignment signal").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Alignment anchor").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Combobox(
+            frame,
+            textvariable=self.alignment_anchor_mode,
+            values=tuple(ALIGNMENT_ANCHOR_MODE_LABELS.values()),
+            width=24,
+            state="readonly",
+        ).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Label(frame, text="Selected anchor file").grid(row=3, column=0, sticky="w", pady=4)
+        self.alignment_anchor_path_entry = ttk.Entry(frame, textvariable=self.alignment_anchor_path, width=44)
+        self.alignment_anchor_path_entry.grid(row=3, column=1, sticky="ew", padx=6, pady=4)
+        self.alignment_anchor_browse_button = ttk.Button(
+            frame,
+            text="Browse…",
+            command=self.pick_alignment_anchor,
+        )
+        self.alignment_anchor_browse_button.grid(row=3, column=2, sticky="w", pady=4)
+
+        ttk.Label(frame, text="Foil alignment signal").grid(row=4, column=0, sticky="w", pady=4)
         ttk.Combobox(
             frame,
             textvariable=self.foil_mode,
             values=("trans", "ref", "fluo"),
             width=12,
             state="readonly",
-        ).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+        ).grid(row=4, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frame, text="Foil filename keyword").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Foil filename keyword").grid(row=5, column=0, sticky="w", pady=4)
         self.foil_keyword_entry = ttk.Entry(frame, textvariable=self.foil_keyword, width=16)
-        self.foil_keyword_entry.grid(row=3, column=1, sticky="w", padx=6, pady=4)
+        self.foil_keyword_entry.grid(row=5, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frame, text="E0 / eV").grid(row=4, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="E0 / eV").grid(row=6, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.e0, width=16).grid(
-            row=4, column=1, sticky="w", padx=6, pady=4
+            row=6, column=1, sticky="w", padx=6, pady=4
         )
 
         ttk.Label(
             frame,
             text="Parameters are user-defined. Save a config file for each edge or experiment type.",
             wraplength=430,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def _build_advanced_section(self, parent):
         frame = ttk.LabelFrame(
@@ -514,6 +544,16 @@ class AstraGui(tk.Tk):
             else:
                 self.foil_keyword_entry.configure(state="normal")
 
+    def _update_alignment_anchor_ui(self, *args):
+        state = "normal" if self._alignment_anchor_mode_value() == "selected_file" else "disabled"
+        for attr in ("alignment_anchor_path_entry", "alignment_anchor_browse_button"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(state=state)
+                except tk.TclError:
+                    pass
+
     def _deglitch_enable_flags(self) -> tuple[bool, bool]:
         if not self.enable_deglitching.get():
             return False, False
@@ -565,6 +605,19 @@ class AstraGui(tk.Tk):
         if d:
             self.output_dir.set(d)
 
+    def pick_alignment_anchor(self):
+        path = filedialog.askopenfilename(
+            title="Select alignment anchor .xasd file",
+            filetypes=[("ASTRA XAS files", "*.xasd"), ("All files", "*.*")],
+        )
+        if path:
+            self.alignment_anchor_path.set(path)
+            self.alignment_anchor_mode.set(ALIGNMENT_ANCHOR_MODE_LABELS["selected_file"])
+
+    def _alignment_anchor_mode_value(self) -> str:
+        value = self.alignment_anchor_mode.get()
+        return ALIGNMENT_ANCHOR_MODE_VALUES.get(value, value)
+
     def _float(self, name: str, var: tk.StringVar) -> float:
         try:
             return float(var.get())
@@ -590,6 +643,12 @@ class AstraGui(tk.Tk):
         keyword = self.foil_keyword.get().strip()
         if self.alignment_source.get() == "separate_foil" and not keyword:
             raise ValueError("Foil filename keyword cannot be empty when alignment source is separate_foil.")
+        alignment_anchor_mode = self._alignment_anchor_mode_value()
+        if alignment_anchor_mode not in {"first_scan", "selected_file"}:
+            raise ValueError("Alignment anchor must be first_scan or selected_file.")
+        alignment_anchor_path = self.alignment_anchor_path.get().strip() or None
+        if alignment_anchor_mode == "selected_file" and not alignment_anchor_path:
+            raise ValueError("Selected alignment anchor mode requires an anchor file.")
 
         align_min = self._float("align min", self.align_min)
         align_max = self._float("align max", self.align_max)
@@ -642,6 +701,8 @@ class AstraGui(tk.Tk):
         return AstraConfig(
             analysis_mode=self.analysis_mode.get(),
             alignment_source=self.alignment_source.get(),
+            alignment_anchor_mode=alignment_anchor_mode,
+            alignment_anchor_path=alignment_anchor_path,
             foil_alignment_mode=self.foil_mode.get(),
             foil_keyword=keyword,
             e0=self._float("E0", self.e0),
@@ -687,6 +748,8 @@ class AstraGui(tk.Tk):
         return {
             "analysis_mode": c.analysis_mode,
             "alignment_source": c.alignment_source,
+            "alignment_anchor_mode": c.alignment_anchor_mode,
+            "alignment_anchor_path": c.alignment_anchor_path,
             "foil_alignment_mode": c.foil_alignment_mode,
             "foil_keyword": c.foil_keyword,
             "e0": c.e0,
@@ -731,6 +794,8 @@ class AstraGui(tk.Tk):
         mapping = {
             "analysis_mode": self.analysis_mode,
             "alignment_source": self.alignment_source,
+            "alignment_anchor_mode": self.alignment_anchor_mode,
+            "alignment_anchor_path": self.alignment_anchor_path,
             "foil_alignment_mode": self.foil_mode,
             "foil_keyword": self.foil_keyword,
             "e0": self.e0,
@@ -775,6 +840,9 @@ class AstraGui(tk.Tk):
             if key in data:
                 if isinstance(var, tk.BooleanVar):
                     var.set(bool(data[key]))
+                elif key == "alignment_anchor_mode":
+                    value = str(data[key])
+                    var.set(ALIGNMENT_ANCHOR_MODE_LABELS.get(value, value))
                 elif data[key] is None:
                     var.set("")
                 else:
@@ -797,6 +865,7 @@ class AstraGui(tk.Tk):
         self._sync_deglitch_backend_vars()
         self._update_deglitch_ui()
         self._update_alignment_ui()
+        self._update_alignment_anchor_ui()
 
     def save_config(self):
         try:

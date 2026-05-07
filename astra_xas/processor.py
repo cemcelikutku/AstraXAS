@@ -20,6 +20,11 @@ AUTO_DEGLITCH_WARNING = (
     "Use manual range deglitching for broad artifacts."
 )
 
+SHIFT_CONVENTION = (
+    "positive shift_eV means +shift_eV is added to the scan energy before "
+    "interpolation/averaging; shifts are relative to the alignment anchor."
+)
+
 
 def interpolate_to_grid(E_source, mu_source, E_target, kind="linear"):
     f = interp1d(E_source, mu_source, kind=kind, bounds_error=False, fill_value=np.nan)
@@ -38,6 +43,29 @@ def _config_float(config, name: str, default: float) -> float:
         return float(getattr(config, name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _relative_output_path(path: str | Path, output_dir: Path) -> str:
+    path = Path(path)
+    try:
+        return path.relative_to(output_dir).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _write_alignment_metadata_header(
+    f,
+    alignment_source: str,
+    alignment_signal_label: str,
+    alignment_anchor_info: dict,
+) -> None:
+    f.write(f"# Alignment source: {alignment_source}\n")
+    f.write(f"# Alignment signal: {alignment_signal_label}\n")
+    f.write(f"# Alignment anchor mode: {alignment_anchor_info['mode']}\n")
+    f.write(f"# Alignment anchor file: {alignment_anchor_info.get('path') or 'N/A'}\n")
+    f.write(f"# Alignment anchor status: {alignment_anchor_info['status']}\n")
+    f.write("# Absolute calibration: not guaranteed unless the alignment anchor was externally calibrated.\n")
+    f.write(f"# Shift convention: {SHIFT_CONVENTION}\n")
 
 
 def _as_clean_list(value):
@@ -89,6 +117,17 @@ def _analysis_signal_spec(config: AstraConfig) -> tuple[str, str]:
     if mode == "ref":
         return "mu_ref", "ln(I1/I2)"
     return "mu_fluo", "IF/I0"
+
+
+def _alignment_signal_spec(alignment_source: str, config: AstraConfig) -> tuple[str, str, str]:
+    mode = "ref" if alignment_source == "inline_ref" else getattr(config, "foil_alignment_mode", "trans")
+    mapping = {
+        "trans": ("mu_trans", "ln(I0/I1)"),
+        "ref": ("mu_ref", "ln(I1/I2)"),
+        "fluo": ("mu_fluo", "IF/I0"),
+    }
+    signal_key, signal_label = mapping.get(mode, mapping["trans"])
+    return mode, signal_key, signal_label
 
 
 def _required_channels_for_signal(mode: str) -> list[tuple[str, str]]:
@@ -250,6 +289,92 @@ def _validate_processing_inputs(entries: list[dict], config: AstraConfig) -> tup
     warnings_out = list(dict.fromkeys(warnings_out))
     fatal_errors = list(dict.fromkeys(fatal_errors))
     return warnings_out, fatal_errors
+
+
+def _entry_from_scan(scan: dict, config: AstraConfig, path: Path | None = None) -> dict:
+    sigs = compute_signals(scan, config)
+    source_path = Path(path) if path is not None else Path(scan.get("path", scan["filename"]))
+    base_name, replicate_id = split_replicate_suffix(scan["filename"])
+    return {
+        "path": source_path,
+        "filename": scan["filename"],
+        "is_foil": config.foil_keyword.lower() in scan["filename"].lower() if config.foil_keyword else False,
+        "energy": sigs["energy"],
+        "mu_trans": sigs["mu_trans"],
+        "mu_ref": sigs["mu_ref"],
+        "mu_fluo": sigs["mu_fluo"],
+        "I0": scan.get("I0"),
+        "I1": scan.get("I1"),
+        "I2": scan.get("I2"),
+        "IF": scan.get("IF"),
+        "FDT": scan.get("FDT"),
+        "Ir": scan.get("Ir"),
+        "base_name": base_name,
+        "replicate_id": replicate_id,
+    }
+
+
+def _same_file(path_a, path_b) -> bool:
+    if path_a is None or path_b is None:
+        return False
+    try:
+        return Path(path_a).expanduser().resolve() == Path(path_b).expanduser().resolve()
+    except OSError:
+        return False
+
+
+def _load_selected_alignment_anchor(config: AstraConfig, alignment_source: str) -> tuple[dict | None, dict]:
+    anchor_mode = getattr(config, "alignment_anchor_mode", "first_scan")
+    _, signal_key, signal_label = _alignment_signal_spec(alignment_source, config)
+    info = {
+        "mode": anchor_mode,
+        "path": None,
+        "status": "not requested",
+        "signal": signal_label,
+    }
+    if anchor_mode == "first_scan":
+        info["status"] = "using first scan automatically"
+        return None, info
+    if anchor_mode != "selected_file":
+        raise RuntimeError("alignment_anchor_mode must be 'first_scan' or 'selected_file'.")
+
+    anchor_path_value = getattr(config, "alignment_anchor_path", None)
+    if not anchor_path_value:
+        raise RuntimeError("Selected alignment anchor mode requires alignment_anchor_path.")
+    anchor_path = Path(anchor_path_value).expanduser()
+    if not anchor_path.exists():
+        raise RuntimeError(f"Selected alignment anchor file does not exist: {anchor_path}")
+    if not anchor_path.is_file():
+        raise RuntimeError(f"Selected alignment anchor path is not a file: {anchor_path}")
+
+    try:
+        anchor_path = anchor_path.resolve()
+        scan = load_xasd(anchor_path)
+        anchor_entry = _entry_from_scan(scan, config, path=anchor_path)
+    except Exception as exc:
+        raise RuntimeError(f"Could not load selected alignment anchor file {anchor_path}: {exc}") from exc
+
+    signal_mode, signal_key, signal_label = _alignment_signal_spec(alignment_source, config)
+    positive_channels = {"I0", "I1", "I2"} if signal_mode in {"trans", "ref"} else {"I0"}
+    validation_errors = []
+    for key, label in _required_channels_for_signal(signal_mode):
+        fatal, warn = _channel_validation_messages(anchor_entry, key, label, require_positive=key in positive_channels)
+        validation_errors.extend(fatal)
+        validation_errors.extend([message for message in warn if " is nearly flat." not in message])
+    structure_warning = _alignment_structure_warning(anchor_entry, signal_key, signal_label, config)
+    if structure_warning is not None:
+        validation_errors.append(structure_warning)
+    if validation_errors:
+        message = "Selected alignment anchor validation failed:\n" + "\n".join(f"- {err}" for err in validation_errors)
+        raise RuntimeError(message)
+
+    info = {
+        "mode": "selected_file",
+        "path": str(anchor_path),
+        "status": "loaded and validated",
+        "signal": signal_label,
+    }
+    return anchor_entry, info
 
 
 def _safe_attr(group: Group, name: str, default=None):
@@ -531,6 +656,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         or getattr(config, "save_norm_overview_plot", True)
         or getattr(config, "save_processed_mu_replicate_qc_plot", True)
         or getattr(config, "save_replicate_qc_plots", True)
+        or getattr(config, "save_drift_plot", False)
     )
     if plots_enabled:
         plots_dir.mkdir(parents=True, exist_ok=True)
@@ -554,26 +680,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
     entries = []
     for path in files:
         scan = load_xasd(path)
-        sigs = compute_signals(scan, config)
-        is_foil = config.foil_keyword.lower() in scan["filename"].lower() if config.foil_keyword else False
-        base_name, replicate_id = split_replicate_suffix(scan["filename"])
-        entries.append({
-            "path": path,
-            "filename": scan["filename"],
-            "is_foil": is_foil,
-            "energy": sigs["energy"],
-            "mu_trans": sigs["mu_trans"],
-            "mu_ref": sigs["mu_ref"],
-            "mu_fluo": sigs["mu_fluo"],
-            "I0": scan.get("I0"),
-            "I1": scan.get("I1"),
-            "I2": scan.get("I2"),
-            "IF": scan.get("IF"),
-            "FDT": scan.get("FDT"),
-            "Ir": scan.get("Ir"),
-            "base_name": base_name,
-            "replicate_id": replicate_id,
-        })
+        entries.append(_entry_from_scan(scan, config, path=path))
 
     detector_raw_files = []
     for e in entries:
@@ -620,6 +727,9 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         raise RuntimeError(message)
 
     alignment_source = getattr(config, "alignment_source", "separate_foil")
+    selected_anchor_entry, alignment_anchor_info = _load_selected_alignment_anchor(config, alignment_source)
+    _, _, alignment_signal_label = _alignment_signal_spec(alignment_source, config)
+    alignment_anchor_path = alignment_anchor_info.get("path")
     shift_records = []
 
     def append_shift_record(filename: str, shift_value: float, quality_value: float):
@@ -651,40 +761,52 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
                 f"or change foil_keyword."
             )
         first_foil = foil_entries[0]
-        E_foil_ref = first_foil["energy"]
-        foil_ref_signal = get_signal(first_foil, config.foil_alignment_mode)
-        foil_shift_map = {
-            first_foil["filename"]: {
-                "shift_eV": 0.0,
-                "fit_error": 0.0,
-                "alignment_quality": 1.0,
+        if selected_anchor_entry is None:
+            E_foil_ref = first_foil["energy"]
+            foil_ref_signal = get_signal(first_foil, config.foil_alignment_mode)
+            foil_shift_map = {
+                first_foil["filename"]: {
+                    "shift_eV": 0.0,
+                    "fit_error": 0.0,
+                    "alignment_quality": 1.0,
+                }
             }
-        }
-        log(f"Reference foil: {first_foil['filename']} shift = 0.0000 eV")
+            log(f"Reference foil: {first_foil['filename']} shift = 0.0000 eV")
+            foils_to_align = foil_entries[1:]
+        else:
+            E_foil_ref = selected_anchor_entry["energy"]
+            foil_ref_signal = get_signal(selected_anchor_entry, config.foil_alignment_mode)
+            foil_shift_map = {}
+            foils_to_align = foil_entries
+            log(f"Selected alignment anchor: {alignment_anchor_path} ({alignment_signal_label})")
 
-        for foil in foil_entries[1:]:
-            shift, err, quality = find_best_shift(
-                E_foil_ref,
-                foil_ref_signal,
-                foil["energy"],
-                get_signal(foil, config.foil_alignment_mode),
-                window=config.align_window,
-                bounds=config.shift_bounds,
-                grid_points=config.alignment_grid_points,
-            )
+        for foil in foils_to_align:
+            if selected_anchor_entry is not None and _same_file(foil.get("path"), alignment_anchor_path):
+                shift, err, quality = 0.0, 0.0, 1.0
+            else:
+                shift, err, quality = find_best_shift(
+                    E_foil_ref,
+                    foil_ref_signal,
+                    foil["energy"],
+                    get_signal(foil, config.foil_alignment_mode),
+                    window=config.align_window,
+                    bounds=config.shift_bounds,
+                    grid_points=config.alignment_grid_points,
+                )
             foil_shift_map[foil["filename"]] = {
                 "shift_eV": shift,
                 "fit_error": err,
                 "alignment_quality": quality,
             }
-            warn_alignment_quality(foil["filename"], err, quality)
+            if not (err == 0.0 and quality == 1.0):
+                warn_alignment_quality(foil["filename"], err, quality)
             if abs(shift) > config.warn_shift_abs_eV:
                 warnings.append(f"Large foil shift: {foil['filename']} = {shift:.4f} eV")
             log(f"Foil {foil['filename']}: shift = {shift:.4f} eV, fit_error = {err:.6g}, quality = {quality:.3f}")
 
-        current_shift = 0.0
-        current_quality = 1.0
         current_foil_name = first_foil["filename"]
+        current_shift = foil_shift_map[current_foil_name]["shift_eV"]
+        current_quality = foil_shift_map[current_foil_name]["alignment_quality"]
         sample_before_first_foil = True
         for e in entries:
             if e["is_foil"]:
@@ -705,21 +827,29 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         if not sample_entries:
             raise RuntimeError("No sample files found.")
         ref_scan = sample_entries[0]
-        E_ref = ref_scan["energy"]
-        mu_ref_signal = ref_scan["mu_ref"]
+        if selected_anchor_entry is None:
+            E_ref = ref_scan["energy"]
+            mu_ref_signal = ref_scan["mu_ref"]
+            ref_name = f"inline_ref:{ref_scan['filename']}"
+            log(f"Inline reference scan: {ref_scan['filename']} shift = 0.0000 eV")
+        else:
+            E_ref = selected_anchor_entry["energy"]
+            mu_ref_signal = selected_anchor_entry["mu_ref"]
+            ref_name = f"inline_ref_anchor:{Path(alignment_anchor_path).name}"
+            log(f"Selected alignment anchor: {alignment_anchor_path} ({alignment_signal_label})")
         foil_entries = []
-        foil_shift_map = {
-            ref_scan["filename"]: {
+        foil_shift_map = {}
+        if selected_anchor_entry is None:
+            foil_shift_map[ref_scan["filename"]] = {
                 "shift_eV": 0.0,
                 "fit_error": 0.0,
                 "alignment_quality": 1.0,
             }
-        }
-        ref_name = f"inline_ref:{ref_scan['filename']}"
-        log(f"Inline reference scan: {ref_scan['filename']} shift = 0.0000 eV")
 
         for e in sample_entries:
-            if e is ref_scan:
+            if selected_anchor_entry is None and e is ref_scan:
+                shift, err, quality = 0.0, 0.0, 1.0
+            elif selected_anchor_entry is not None and _same_file(e.get("path"), alignment_anchor_path):
                 shift, err, quality = 0.0, 0.0, 1.0
             else:
                 shift, err, quality = find_best_shift(
@@ -740,7 +870,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
                 "alignment_quality": quality,
             }
             append_shift_record(e["filename"], shift, quality)
-            if e is not ref_scan:
+            if not (err == 0.0 and quality == 1.0):
                 warn_alignment_quality(e["filename"], err, quality)
             if abs(shift) > config.warn_shift_abs_eV:
                 warnings.append(f"Large inline reference shift: {e['filename']} = {shift:.4f} eV")
@@ -773,6 +903,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
     plot_energy_range = (config.plot_energy_min, config.plot_energy_max)
     detector_health_plot_info = {"path": None, "channels": [], "skipped": []}
     analysis_signal_qc_info = {"path": None, "signal": "", "n_traces": 0, "skipped": []}
+    drift_plot_info = {"path": None, "status": "disabled", "reason": ""}
 
     if getattr(config, "save_detector_health_overview_plot", True):
         detector_health_records = [
@@ -822,13 +953,22 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
     if config.save_drift_plot:
         overview_dir.mkdir(parents=True, exist_ok=True)
         drift_path = overview_dir / "drift_tracker.png"
-        plot_drift(
-            shift_records,
-            drift_path,
-            warn_threshold_eV=config.warn_shift_abs_eV,
-            quality_threshold=config.alignment_quality_warn_threshold,
-        )
-        plot_files.append(drift_path)
+        try:
+            plot_drift(
+                shift_records,
+                drift_path,
+                warn_threshold_eV=config.warn_shift_abs_eV,
+                quality_threshold=config.alignment_quality_warn_threshold,
+            )
+            plot_files.append(drift_path)
+            drift_plot_info = {"path": drift_path, "status": "created", "reason": ""}
+            log(f"Saved plot: {drift_path}")
+        except Exception as exc:
+            reason = str(exc)
+            drift_plot_info = {"path": None, "status": "failed", "reason": reason}
+            warning = f"Could not save drift tracker plot: {reason}"
+            warnings.append(warning)
+            log("WARNING: " + warning)
 
     with open(output_dir / "ASTRA_excluded_scans.dat", "w", encoding="utf-8") as f:
         f.write("# filename\tbase_name\treplicate_id\treason\n")
@@ -851,6 +991,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
             f.write("# None\n")
 
     with open(output_dir / "ASTRA_energy_shifts.dat", "w", encoding="utf-8") as f:
+        _write_alignment_metadata_header(f, alignment_source, alignment_signal_label, alignment_anchor_info)
         f.write("# filename\tbase_name\treplicate_id\tassigned_foil\tenergy_shift_eV\talignment_quality\n")
         for s in sample_entries:
             rep = "None" if s["replicate_id"] is None else str(s["replicate_id"])
@@ -860,10 +1001,11 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
             )
 
     with open(output_dir / "ASTRA_foil_alignment.dat", "w", encoding="utf-8") as f:
-        f.write("# foil_filename\tshift_eV\tfit_error\talignment_quality\n")
+        _write_alignment_metadata_header(f, alignment_source, alignment_signal_label, alignment_anchor_info)
         f.write("# alignment_quality: Pearson r between z-scored derivatives at best shift.\n")
         f.write("#   Near 1.0 = reliable. Below 0.7 = suspect.\n")
         f.write("#   not-finite fit_error with quality=0.0 means alignment was skipped.\n")
+        f.write("# foil_filename\tshift_eV\tfit_error\talignment_quality\n")
         for foil_name, info in foil_shift_map.items():
             f.write(
                 f"{foil_name}\t{info['shift_eV']:.6f}\t{info['fit_error']:.8g}\t"
@@ -880,6 +1022,8 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
     total_manual_range_interpolated_points = 0
     processed_mu_replicate_qc_created = 0
     processed_mu_replicate_qc_skipped: list[str] = []
+    normalized_replicate_qc_created = 0
+    normalized_replicate_qc_skipped: list[str] = []
 
     for (base_name, assigned_foil), scans in groups.items():
         log(f"Processing group: {base_name} ({len(scans)} scan(s))")
@@ -1054,25 +1198,34 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         if detector_group_if:
             detector_raw_plot_records.append({"energy": master_energy, "mu": np.nanmean(np.asarray(detector_group_if), axis=0), "label": output_base})
 
-        if getattr(config, "save_replicate_qc_plots", True) and len(norm_array) > 1:
-            try:
-                normalized_replicate_records = [
-                    {"energy": master_energy, "mu": norm_array[i], "label": source_filenames[i]}
-                    for i in range(len(source_filenames))
-                ]
-                plot_replicate_qc(
-                    group_name=output_base,
-                    replicate_records=normalized_replicate_records,
-                    average_record={"energy": master_energy, "mu": norm_avg, "label": "average"},
-                    output_path=replicate_qc_dir / f"{output_base}_normalized_replicate_qc.png",
-                    energy_range=plot_energy_range,
-                    y_label="Normalized intensity",
-                )
-                log(f"Saving replicate QC plot: {output_base}")
-            except Exception as exc:
-                warning = f"Could not save replicate QC plot for {output_base}: {exc}"
-                warnings.append(warning)
-                log("WARNING: " + warning)
+        if getattr(config, "save_replicate_qc_plots", True):
+            if len(norm_array) > 1:
+                try:
+                    normalized_replicate_records = [
+                        {"energy": master_energy, "mu": norm_array[i], "label": source_filenames[i]}
+                        for i in range(len(source_filenames))
+                    ]
+                    path = plot_replicate_qc(
+                        group_name=output_base,
+                        replicate_records=normalized_replicate_records,
+                        average_record={"energy": master_energy, "mu": norm_avg, "label": "average"},
+                        output_path=replicate_qc_dir / f"{output_base}_normalized_replicate_qc.png",
+                        energy_range=plot_energy_range,
+                        y_label="Normalized intensity",
+                    )
+                    if path is not None:
+                        plot_files.append(path)
+                        normalized_replicate_qc_created += 1
+                        log(f"Saving normalized replicate QC plot: {output_base}")
+                    else:
+                        normalized_replicate_qc_skipped.append(f"{output_base}: no finite normalized traces in plot range")
+                except Exception as exc:
+                    warning = f"Could not save normalized replicate QC plot for {output_base}: {exc}"
+                    warnings.append(warning)
+                    normalized_replicate_qc_skipped.append(f"{output_base}: {exc}")
+                    log("WARNING: " + warning)
+            else:
+                normalized_replicate_qc_skipped.append(f"{output_base}: fewer than 2 valid normalized scans")
 
         group_summary_rows.append([output_base, base_name, assigned_foil, str(len(processed_array)), source_filenames[0], source_filenames[-1]])
         std_str = "N/A" if not np.isfinite(std_edge_step) else f"{std_edge_step:.8g}"
@@ -1153,6 +1306,14 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         if not (info["fit_error"] == 0.0 and info["alignment_quality"] == 1.0)
         and info["alignment_quality"] < config.alignment_quality_warn_threshold
     )
+    relative_plot_files = [_relative_output_path(path, output_dir) for path in plot_files]
+    overview_plot_files = [path for path in relative_plot_files if path.startswith("plots/overview/")]
+    replicate_qc_plot_files = [path for path in relative_plot_files if path.startswith("plots/replicate_qc/")]
+    other_plot_files = [
+        path
+        for path in relative_plot_files
+        if not path.startswith("plots/overview/") and not path.startswith("plots/replicate_qc/")
+    ]
 
     with open(output_dir / "ASTRA_processing_report.txt", "w", encoding="utf-8") as f:
         f.write(f"{config.version}\n")
@@ -1170,6 +1331,13 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         f.write(f"Replicate outliers skipped: {len(auto_outlier_entries)}\n")
         f.write(f"Foils found: {len(foil_entries)}\n")
         f.write(f"Groups processed: {len(group_summary_rows)}\n")
+        f.write(f"Alignment source: {alignment_source}\n")
+        f.write(f"Alignment signal: {alignment_signal_label}\n")
+        f.write(f"Alignment anchor mode: {alignment_anchor_info['mode']}\n")
+        f.write(f"Alignment anchor file: {alignment_anchor_info.get('path') or 'N/A'}\n")
+        f.write(f"Alignment anchor status: {alignment_anchor_info['status']}\n")
+        f.write("Absolute calibration: not guaranteed unless the alignment anchor was externally calibrated.\n")
+        f.write(f"Shift convention: {SHIFT_CONVENTION}\n")
         f.write(
             f"Low-quality alignments (quality < {config.alignment_quality_warn_threshold}): "
             f"{low_quality_count}\n"
@@ -1211,22 +1379,46 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         else:
             f.write("Analysis signal QC: disabled\n")
         if getattr(config, "save_processed_mu_replicate_qc_plot", True):
-            skipped = "; ".join(processed_mu_replicate_qc_skipped) or "None"
             f.write(
                 f"Processed μ(E) replicate QC plots: created {processed_mu_replicate_qc_created}; "
-                f"skipped: {skipped}\n"
+                f"skipped {len(processed_mu_replicate_qc_skipped)}\n"
             )
+            for skipped in processed_mu_replicate_qc_skipped:
+                f.write(f"  - {skipped}\n")
         else:
             f.write("Processed μ(E) replicate QC plots: disabled\n")
+        if getattr(config, "save_replicate_qc_plots", True):
+            f.write(
+                f"Normalized replicate QC plots: created {normalized_replicate_qc_created}; "
+                f"skipped {len(normalized_replicate_qc_skipped)}\n"
+            )
+            for skipped in normalized_replicate_qc_skipped:
+                f.write(f"  - {skipped}\n")
+        else:
+            f.write("Normalized replicate QC plots: disabled\n")
         if getattr(config, "save_detector_raw_overview_plot", False):
             f.write("Aligned averaged IF overview: plots/overview/aligned_averaged_IF_overview.png\n")
         else:
             f.write("Aligned averaged IF overview: disabled\n")
+        if drift_plot_info["status"] == "created":
+            f.write(f"Drift tracker: created ({_relative_output_path(drift_plot_info['path'], output_dir)})\n")
+        elif drift_plot_info["status"] == "failed":
+            f.write(f"Drift tracker: failed ({drift_plot_info['reason']})\n")
+        else:
+            f.write("Drift tracker: disabled\n")
         f.write("Processed μ(E) files use *_processed.dat; true detector channels use detector_raw/*_detector_raw.dat.\n")
-        f.write(f"Plots created: {len(plot_files)}\n")
-        for plot_file in plot_files:
+        f.write(f"Total plots created: {len(relative_plot_files)}\n")
+        f.write(f"Overview plots created: {len(overview_plot_files)}\n")
+        for plot_file in overview_plot_files:
             f.write(f"- {plot_file}\n")
-        f.write("\nWarnings:\n")
+        f.write(f"Replicate QC plots created: {len(replicate_qc_plot_files)}\n")
+        for plot_file in replicate_qc_plot_files:
+            f.write(f"- {plot_file}\n")
+        if other_plot_files:
+            f.write(f"Other plots created: {len(other_plot_files)}\n")
+            for plot_file in other_plot_files:
+                f.write(f"- {plot_file}\n")
+        f.write("\nProcessing warnings:\n")
         if warnings:
             for w in warnings:
                 f.write(f"- {w}\n")
