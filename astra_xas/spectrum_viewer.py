@@ -129,6 +129,36 @@ def _find_column(columns: dict[str, np.ndarray], *names: str) -> np.ndarray | No
     return None
 
 
+def default_y_label_for_channel(channel: str | None) -> str:
+    """Return a scientifically honest default y-axis label for a viewer channel."""
+    key = (channel or "").strip().lower()
+    compact = key.replace(" ", "").replace("_", "").replace("-", "")
+
+    if compact in {"i0"}:
+        return "I0 incident intensity"
+    if compact in {"i1"}:
+        return "I1 transmitted intensity"
+    if compact in {"i2"}:
+        return "I2 reference intensity"
+    if compact in {"if"}:
+        return "IF fluorescence detector signal"
+    if compact in {"fdt"}:
+        return "FDT detector diagnostic"
+    if compact in {"if/i0", "fluo", "mufluo", "mufluoifi0"}:
+        return "Fluorescence signal IF/I0"
+    if compact in {"ln(i0/i1)", "trans", "mutrans", "mutranslni0i1"}:
+        return "Transmission μ(E) = ln(I0/I1)"
+    if compact in {"ln(i1/i2)", "ref", "muref", "mureflni1i2"}:
+        return "Reference μ(E) = ln(I1/I2)"
+    if compact in {"mu", "processedmu", "processedmue", "processed", "signal", "raw"}:
+        return "Processed μ(E)"
+    if compact in {"norm", "normalized", "normalizedxanes"}:
+        return "Normalized XANES"
+    if compact in {"flat", "flattened"}:
+        return "Flattened normalized XANES"
+    return "Signal"
+
+
 def read_spectrum_dat(path: str | Path, channel: str = "auto") -> tuple[np.ndarray, np.ndarray, str]:
     energy, columns, _header = read_dat_table(path)
     if not columns:
@@ -216,15 +246,19 @@ class SpectrumViewer(tk.Toplevel):
         self.fig_width = tk.StringVar(value="8.0")
         self.fig_height = tk.StringVar(value="5.5")
         self.xlabel = tk.StringVar(value="Energy (eV)")
-        self.ylabel = tk.StringVar(value="Normalized XANES")
+        self.ylabel = tk.StringVar(value=default_y_label_for_channel("auto"))
         self.legend_location = tk.StringVar(value="lower right")
         self.title_text = tk.StringVar(value="")
         self.grid_on = tk.BooleanVar(value=False)
         self.selected_label = tk.StringVar(value="")
         self.selected_file = tk.StringVar(value="No spectrum selected")
         self.status = tk.StringVar(value="Select processed .dat files to compare.")
+        self._auto_ylabel = True
+        self._updating_ylabel = False
 
         self._build()
+        self.plot_channel.trace_add("write", self._on_plot_channel_change)
+        self.ylabel.trace_add("write", self._on_ylabel_change)
 
     def _build(self):
         root = ttk.Frame(self, padding=10)
@@ -356,7 +390,11 @@ class SpectrumViewer(tk.Toplevel):
         ttk.Entry(settings, textvariable=self.xlabel, width=24).grid(row=r, column=1, sticky="ew", pady=3)
         r += 1
         ttk.Label(settings, text="Y-axis label").grid(row=r, column=0, sticky="w", pady=3)
-        ttk.Entry(settings, textvariable=self.ylabel, width=24).grid(row=r, column=1, sticky="ew", pady=3)
+        ylabel_frame = ttk.Frame(settings)
+        ylabel_frame.grid(row=r, column=1, sticky="ew", pady=3)
+        ylabel_frame.columnconfigure(0, weight=1)
+        ttk.Entry(ylabel_frame, textvariable=self.ylabel, width=24).grid(row=0, column=0, sticky="ew")
+        ttk.Button(ylabel_frame, text="Auto", command=self.reset_y_label).grid(row=0, column=1, padx=(6, 0))
         r += 1
         ttk.Label(settings, text="Legend location").grid(row=r, column=0, sticky="w", pady=3)
         ttk.Combobox(settings, textvariable=self.legend_location, width=18, state="readonly", values=(
@@ -389,10 +427,53 @@ class SpectrumViewer(tk.Toplevel):
         idx = indices[0]
         self.selected_file.set(self.files[idx].name)
         self.selected_label.set(self.labels[idx])
+        if self._auto_ylabel and self.plot_channel.get().strip().lower() in {"auto", "first signal", "first_signal"}:
+            self._set_auto_y_label()
 
     def _focus_label_entry(self):
         self.label_entry.focus_set()
         self.label_entry.selection_range(0, "end")
+
+    def _first_resolved_channel(self) -> str | None:
+        if not self.files:
+            return None
+        selected = self._selected_indices() or list(range(len(self.files)))
+        if not selected:
+            return None
+        try:
+            _energy, _y, y_col = read_spectrum_dat(self.files[selected[0]], channel=self.plot_channel.get())
+            return y_col
+        except Exception:
+            return None
+
+    def _auto_y_label(self) -> str:
+        channel = self.plot_channel.get()
+        if channel.strip().lower() in {"auto", "first signal", "first_signal"}:
+            resolved = self._first_resolved_channel()
+            if resolved:
+                label = default_y_label_for_channel(resolved)
+                if label != "Signal":
+                    return label
+        return default_y_label_for_channel(channel)
+
+    def _set_auto_y_label(self):
+        self._updating_ylabel = True
+        try:
+            self.ylabel.set(self._auto_y_label())
+        finally:
+            self._updating_ylabel = False
+
+    def _on_plot_channel_change(self, *_args):
+        self._auto_ylabel = True
+        self._set_auto_y_label()
+
+    def _on_ylabel_change(self, *_args):
+        if not self._updating_ylabel:
+            self._auto_ylabel = False
+
+    def reset_y_label(self):
+        self._auto_ylabel = True
+        self._set_auto_y_label()
 
     def add_files(self):
         paths = filedialog.askopenfilenames(
@@ -406,6 +487,8 @@ class SpectrumViewer(tk.Toplevel):
             self.files.append(path)
             self.labels.append(self._default_label(path))
         self._refresh_tree(select_last=True)
+        if self._auto_ylabel:
+            self._set_auto_y_label()
 
     @staticmethod
     def _default_label(path: Path) -> str:
@@ -416,11 +499,15 @@ class SpectrumViewer(tk.Toplevel):
         self.files = [f for i, f in enumerate(self.files) if i not in selected]
         self.labels = [lab for i, lab in enumerate(self.labels) if i not in selected]
         self._refresh_tree()
+        if self._auto_ylabel:
+            self._set_auto_y_label()
 
     def clear_files(self):
         self.files.clear()
         self.labels.clear()
         self._refresh_tree()
+        if self._auto_ylabel:
+            self._set_auto_y_label()
 
     def auto_labels(self):
         self.labels = [self._default_label(p) for p in self.files]
