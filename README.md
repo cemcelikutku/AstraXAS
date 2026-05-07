@@ -199,6 +199,23 @@ This is different from `plots/overview/processed_mu_overview.png`: the overview 
 
 ---
 
+## Validation warnings
+
+Before alignment and merging, AstraXAS runs a diagnostic validation pass on the scans that remain after manual exclusions. This pass does not modify data, deglitch, reject scans, or change processing results. It only records warnings when selected modes or energy ranges look inconsistent with the available data.
+
+Validation checks include:
+
+- Required channels for `analysis_mode`: `IF` and `I0` for fluorescence, `I0` and `I1` for transmission, `I1` and `I2` for reference.
+- Required reference channels for `inline_ref` alignment.
+- Required foil-alignment channels in `separate_foil` mode.
+- All-zero, all-non-finite, nearly flat, or non-positive channels where division/log calculations need positive values.
+- Plot range, alignment window, pre-edge range, and normalization range overlap with the data energy range.
+- Weak structure in the selected alignment signal inside the alignment window.
+
+Warnings are printed in the processing log and written to a dedicated `Validation warnings` section in `ASTRA_processing_report.txt`. If no validation warnings are found, the report writes `Validation warnings: none`.
+
+---
+
 ## Deglitching
 
 AstraXAS includes optional deglitching for scan-level artifacts. Deglitching operates on each aligned replicate before replicate averaging. The merge-then-normalize workflow is preserved: corrected μ(E) replicates are merged first, and Larch `pre_edge` normalization is applied once to the merged spectrum.
@@ -287,7 +304,7 @@ For each sample group, AstraXAS writes the following to the output directory:
 | `plots/overview/normalized_overview.png` | All normalized spectra overlaid |
 | `plots/overview/drift_tracker.png` | Optional scan-by-scan energy shift plot, written when `save_drift_plot=True` |
 | `<sample>_deglitch_log.dat` | Deglitch point log, written only when deglitching modifies points |
-| `ASTRA_processing_report.txt` | Full parameter log, per-group summary, low-quality alignment count, warnings, and deglitch point counts |
+| `ASTRA_processing_report.txt` | Full parameter log, validation warnings, per-group summary, low-quality alignment count, warnings, and deglitch point counts |
 | `ASTRA_energy_shifts.dat` | Per-sample shift table: filename, base name, replicate id, assigned foil/reference, shift, alignment quality |
 | `ASTRA_foil_alignment.dat` | Per-foil or inline-reference alignment table: filename, shift, fit error, alignment quality |
 | `ASTRA_normalization_summary.dat` | Edge step, E₀, and normalization metadata per group |

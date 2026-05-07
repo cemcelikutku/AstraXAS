@@ -91,6 +91,167 @@ def _analysis_signal_spec(config: AstraConfig) -> tuple[str, str]:
     return "mu_fluo", "IF/I0"
 
 
+def _required_channels_for_signal(mode: str) -> list[tuple[str, str]]:
+    if mode == "trans":
+        return [("I0", "I0"), ("I1", "I1")]
+    if mode == "ref":
+        return [("I1", "I1"), ("I2", "I2")]
+    return [("IF", "IF"), ("I0", "I0")]
+
+
+def _range_overlap_status(name: str, selected_range: tuple[float, float], data_range: tuple[float, float]) -> str | None:
+    lo, hi = sorted((float(selected_range[0]), float(selected_range[1])))
+    data_lo, data_hi = data_range
+    if hi < data_lo or lo > data_hi:
+        return (
+            f"{name} {lo:.6g}-{hi:.6g} eV does not overlap data energy range "
+            f"{data_lo:.6g}-{data_hi:.6g} eV."
+        )
+    if lo < data_lo or hi > data_hi:
+        return (
+            f"{name} {lo:.6g}-{hi:.6g} eV only partially overlaps data energy range "
+            f"{data_lo:.6g}-{data_hi:.6g} eV."
+        )
+    return None
+
+
+def _channel_validation_messages(entry: dict, key: str, label: str, require_positive: bool = False) -> tuple[list[str], list[str]]:
+    fatal_errors = []
+    warnings_out = []
+    values = entry.get(key)
+    filename = entry.get("filename", "unknown")
+    if values is None:
+        fatal_errors.append(f"{filename}: required channel {label} is missing.")
+        return fatal_errors, warnings_out
+
+    values = np.asarray(values, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        warnings_out.append(f"{filename}: required channel {label} contains no finite values.")
+        return fatal_errors, warnings_out
+
+    if np.all(finite == 0):
+        warnings_out.append(f"{filename}: required channel {label} is all zeros.")
+    if require_positive and np.any(finite <= 0):
+        warnings_out.append(f"{filename}: required channel {label} contains non-positive values used in division/log calculations.")
+
+    if finite.size >= 2:
+        span = float(np.nanmax(finite) - np.nanmin(finite))
+        scale = max(float(np.nanmax(np.abs(finite))), 1e-30)
+        if span < scale * 1e-9:
+            warnings_out.append(f"{filename}: required channel {label} is nearly flat.")
+    return fatal_errors, warnings_out
+
+
+def _alignment_structure_warning(entry: dict, signal_key: str, signal_label: str, config: AstraConfig) -> str | None:
+    energy = np.asarray(entry.get("energy"), dtype=float)
+    signal = entry.get(signal_key)
+    if signal is None:
+        return f"{entry.get('filename', 'unknown')}: alignment signal {signal_label} is missing."
+    signal = np.asarray(signal, dtype=float)
+    lo, hi = config.align_window
+    mask = (energy >= lo) & (energy <= hi) & np.isfinite(energy) & np.isfinite(signal)
+    if np.count_nonzero(mask) < 10:
+        return (
+            f"{entry.get('filename', 'unknown')}: alignment signal {signal_label} has fewer than "
+            f"10 finite points in alignment window {lo:g}-{hi:g} eV."
+        )
+    ew = energy[mask]
+    sw = signal[mask]
+    order = np.argsort(ew)
+    ew = ew[order]
+    sw = sw[order]
+    try:
+        derivative = np.gradient(sw, ew)
+    except Exception as exc:
+        return f"{entry.get('filename', 'unknown')}: alignment signal {signal_label} derivative could not be evaluated: {exc}"
+    signal_scale = np.nanmax(sw) - np.nanmin(sw)
+    derivative_range = np.nanmax(derivative) - np.nanmin(derivative)
+    floor = max(signal_scale * 1e-6, 1e-15)
+    if (
+        not np.isfinite(signal_scale)
+        or not np.isfinite(derivative_range)
+        or signal_scale < 1e-15
+        or derivative_range < floor
+    ):
+        return (
+            f"{entry.get('filename', 'unknown')}: selected alignment signal {signal_label} has weak "
+            f"structure in alignment window {lo:g}-{hi:g} eV; alignment may be unreliable."
+        )
+    return None
+
+
+def _validate_processing_inputs(entries: list[dict], config: AstraConfig) -> tuple[list[str], list[str]]:
+    warnings_out: list[str] = []
+    fatal_errors: list[str] = []
+
+    energies = [
+        np.asarray(e.get("energy"), dtype=float)
+        for e in entries
+        if e.get("energy") is not None and np.isfinite(np.asarray(e.get("energy"), dtype=float)).any()
+    ]
+    if energies:
+        finite_energy = np.concatenate([arr[np.isfinite(arr)] for arr in energies])
+        data_range = (float(np.nanmin(finite_energy)), float(np.nanmax(finite_energy)))
+        ranges = [
+            ("Plot range", (config.plot_energy_min, config.plot_energy_max)),
+            ("Alignment window", config.align_window),
+            ("Pre-edge range", (config.e0 + config.pre1, config.e0 + config.pre2)),
+            ("Normalization range", (config.e0 + config.norm1, config.e0 + config.norm2)),
+        ]
+        for name, selected_range in ranges:
+            message = _range_overlap_status(name, selected_range, data_range)
+            if message is not None:
+                warnings_out.append(message)
+    else:
+        warnings_out.append("No finite energy values found for validation.")
+
+    mode = getattr(config, "analysis_mode", "fluo")
+    required_channels = _required_channels_for_signal(mode)
+    positive_channels = {"I0", "I1", "I2"} if mode in {"trans", "ref"} else {"I0"}
+    for entry in entries:
+        if entry.get("is_foil"):
+            continue
+        for key, label in required_channels:
+            fatal, warn = _channel_validation_messages(entry, key, label, require_positive=key in positive_channels)
+            fatal_errors.extend(fatal)
+            warnings_out.extend(warn)
+
+    alignment_source = getattr(config, "alignment_source", "separate_foil")
+    if alignment_source == "inline_ref":
+        alignment_entries = [e for e in entries if not e.get("is_foil")]
+        for entry in alignment_entries:
+            for key, label in _required_channels_for_signal("ref"):
+                fatal, warn = _channel_validation_messages(entry, key, label, require_positive=True)
+                fatal_errors.extend(fatal)
+                warnings_out.extend(warn)
+            message = _alignment_structure_warning(entry, "mu_ref", "ln(I1/I2)", config)
+            if message is not None:
+                warnings_out.append(message)
+    else:
+        foil_entries = [e for e in entries if e.get("is_foil")]
+        alignment_mode = getattr(config, "foil_alignment_mode", "trans")
+        signal_key, signal_label = {
+            "trans": ("mu_trans", "ln(I0/I1)"),
+            "ref": ("mu_ref", "ln(I1/I2)"),
+            "fluo": ("mu_fluo", "IF/I0"),
+        }.get(alignment_mode, ("mu_trans", "ln(I0/I1)"))
+        positive_channels = {"I0", "I1", "I2"} if alignment_mode in {"trans", "ref"} else {"I0"}
+        for entry in foil_entries:
+            for key, label in _required_channels_for_signal(alignment_mode):
+                fatal, warn = _channel_validation_messages(entry, key, label, require_positive=key in positive_channels)
+                fatal_errors.extend(fatal)
+                warnings_out.extend(warn)
+            message = _alignment_structure_warning(entry, signal_key, signal_label, config)
+            if message is not None:
+                warnings_out.append(message)
+
+    # Preserve order while removing duplicates from overlapping analysis/alignment checks.
+    warnings_out = list(dict.fromkeys(warnings_out))
+    fatal_errors = list(dict.fromkeys(fatal_errors))
+    return warnings_out, fatal_errors
+
+
 def _safe_attr(group: Group, name: str, default=None):
     try:
         return getattr(group, name)
@@ -381,6 +542,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
             replicate_qc_dir.mkdir(parents=True, exist_ok=True)
 
     warnings: list[str] = []
+    validation_warnings: list[str] = []
     log(f"Starting {config.version}")
     log(f"Input directory: {input_dir}")
     log(f"Output directory: {output_dir}")
@@ -448,6 +610,14 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
 
     if not entries:
         raise RuntimeError("No .xasd files remain after applying manual exclusions.")
+
+    validation_warnings, validation_errors = _validate_processing_inputs(entries, config)
+    for warning in validation_warnings:
+        log("VALIDATION WARNING: " + warning)
+    if validation_errors:
+        message = "Input validation failed:\n" + "\n".join(f"- {err}" for err in validation_errors)
+        log("ERROR: " + message)
+        raise RuntimeError(message)
 
     alignment_source = getattr(config, "alignment_source", "separate_foil")
     shift_records = []
@@ -988,6 +1158,13 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         f.write(f"{config.version}\n")
         f.write(f"Input directory: {input_dir}\nOutput directory: {output_dir}\n")
         f.write(f"Files found: {len(files)}\n")
+        f.write("\nValidation warnings:\n")
+        if validation_warnings:
+            for warning in validation_warnings:
+                f.write(f"- {warning}\n")
+        else:
+            f.write("Validation warnings: none\n")
+        f.write("\nProcessing summary:\n")
         f.write(f"Files excluded manually: {len(excluded_entries)}\n")
         f.write(f"Files rejected by shift safety: {len(auto_shift_rejected_entries)}\n")
         f.write(f"Replicate outliers skipped: {len(auto_outlier_entries)}\n")
@@ -1063,6 +1240,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         "detector_raw_dir": output_dir / "detector_raw",
         "detector_raw_files": len(detector_raw_files),
         "warnings": warnings,
+        "validation_warnings": validation_warnings,
         "groups_processed": len(group_summary_rows),
         "manual_excluded": len(excluded_entries),
         "shift_rejected": len(auto_shift_rejected_entries),
