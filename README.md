@@ -2,13 +2,14 @@
 
 **Open-source XAS preprocessing and visualization toolkit originally developed for ASTRA beamline `.xasd` data at the SOLARIS Synchrotron.**
 
-AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) preprocessing, including foil drift correction, optional deglitching, replicate alignment, scan merging, Athena-style normalization, and interactive spectrum visualization. Although originally developed around the ASTRA beamline at the SOLARIS Synchrotron, the processing workflow is adaptable to other XAS beamlines provided that compatible detector channels and energy-resolved scan formats are available.
+AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) preprocessing, including foil drift correction, alignment quality checks, optional deglitching, replicate alignment, scan merging, Athena-style normalization, automatic QC plots, and interactive spectrum visualization. Although originally developed around the ASTRA beamline at the SOLARIS Synchrotron, the processing workflow is adaptable to other XAS beamlines provided that compatible detector channels and energy-resolved scan formats are available.
 
 ---
 
 ## Features
 
-- **Automatic foil drift correction** — aligns each scan to a reference foil (inline I₂ or separate foil files) using derivative cross-correlation, with user-configurable energy windows and shift bounds
+- **Automatic foil drift correction** — aligns each scan to a reference foil (inline I₂ or separate foil files) using derivative-shape matching, a coarse global grid search, and local refinement
+- **Alignment quality scoring** — reports a Pearson-r quality score for every alignment and warns when scans fall below a configurable quality threshold
 - **Merge-then-normalize workflow** — averages raw μ(E) replicates first, then applies normalization once to the merged spectrum, following common Athena-style XAS preprocessing practice
 - **Athena-compatible normalization** — uses Larch's `pre_edge` with full control over pre-edge range, normalization range, polynomial order, and E₀
 - **Three analysis modes** — fluorescence (`IF/I0`), transmission (`ln(I0/I1)`), and reference (`ln(I1/I2)`)
@@ -17,7 +18,7 @@ AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) pr
 - **Automatic outlier detection** — optionally flag and exclude replicates that deviate from the group mean by a configurable RMS threshold
 - **Shift rejection** — optionally exclude replicates whose energy shift exceeds a threshold before merging
 - **Detector raw export** — saves all raw detector channels (I0, I1, I2, IF, FDT, Ir) alongside processed outputs, plottable directly in the Spectrum Viewer
-- **Automatic plots** — overview plots for processed μ(E), background-corrected, and normalized spectra; per-group replicate QC plots
+- **Automatic plots** — overview plots for processed μ(E), background-corrected, and normalized spectra; per-group replicate QC plots; optional energy drift tracker
 - **Interactive Spectrum Viewer** — compare any `.dat` files side by side with Savitzky-Golay smoothing, raw/smoothed overlay, legend toggling, click-to-read energy values, and publication-ready figure export
 - **JSON config system** — save and load processing parameters per edge or experiment type
 - **CLI and Python API** — run headless from the command line or call `process_folder()` from a script
@@ -91,6 +92,9 @@ config = AstraConfig(
     pre1=-229.74, pre2=-49.98,
     norm1=55.07,  norm2=227.22,
     nnorm=1,
+    alignment_quality_warn_threshold=0.7,
+    alignment_grid_points=50,
+    save_drift_plot=True,
     plot_energy_min=7100.0,
     plot_energy_max=7160.0,
 )
@@ -108,7 +112,8 @@ print(result["output_dir"])
     │
     ├─ Load detector channels (E, I0, I1, I2, IF, FDT, Ir)
     ├─ Compute μ(E) per scan (IF/I0, ln(I0/I1), or ln(I1/I2))
-    ├─ Align each scan to foil reference via derivative cross-correlation
+    ├─ Align each scan to foil reference via derivative-shape matching
+    ├─ Score alignment quality and record energy drift
     ├─ [Optional] Deglitch aligned replicates before merging
     ├─ [Optional] Reject outlier replicates
     │
@@ -122,8 +127,31 @@ print(result["output_dir"])
          ├─ <sample>_flat.dat        (flattened normalized μ(E))
          ├─ detector_raw/<scan>.dat  (all detector channels)
          ├─ plots/                   (overview and QC plots)
+         ├─ ASTRA_energy_shifts.dat
+         ├─ ASTRA_foil_alignment.dat
          └─ ASTRA_processing_report.txt
 ```
+
+---
+
+## Alignment and drift tracking
+
+AstraXAS supports two alignment sources:
+
+- `inline_ref` uses the reference channel (`ln(I1/I2)`) measured in each sample scan. The first sample scan is the zero-shift reference.
+- `separate_foil` uses files whose names contain `foil_keyword` as reference foil scans. The first foil scan is the zero-shift reference, and each sample inherits the shift and quality of its most recent assigned foil scan.
+
+Alignment is performed in the configured energy window (`align_window_min/max`) and bounded by `shift_bound_min/max`. The current engine sanitizes non-finite points, sorts spectra by energy, removes duplicate moving-spectrum energies, checks that the reference has usable derivative amplitude, then searches for the best shift using a coarse grid followed by local optimization. The moving spectrum is interpolated with a cubic spline before derivative comparison.
+
+Each computed alignment writes:
+
+- `shift_eV` — energy shift applied to the scan or foil.
+- `fit_error` — residual mean-squared error between z-scored derivatives.
+- `alignment_quality` — Pearson correlation between z-scored derivatives at the best shift. Values near `1.0` are reliable; values below `alignment_quality_warn_threshold` are suspect.
+
+If alignment cannot be evaluated because the reference or moving spectrum is unusable, AstraXAS sets `shift_eV = 0.0`, `fit_error = NaN`, and `alignment_quality = 0.0`, then records an explicit warning.
+
+Set `save_drift_plot=True` to write `plots/drift_tracker.png`. Reliable scans are shown as filled blue circles, while low-quality scans are shown as open red circles. Red dashed horizontal lines mark `±warn_shift_abs_eV`.
 
 ---
 
@@ -209,12 +237,15 @@ For each sample group, AstraXAS writes the following to the output directory:
 | `plots/processed_mu_overview.png` | All merged processed μ(E) spectra overlaid |
 | `plots/background_corrected_overview.png` | All background-corrected spectra overlaid |
 | `plots/normalized_overview.png` | All normalized spectra overlaid |
+| `plots/drift_tracker.png` | Optional scan-by-scan energy shift plot, written when `save_drift_plot=True` |
 | `<sample>_deglitch_log.dat` | Deglitch point log, written only when deglitching modifies points |
-| `ASTRA_processing_report.txt` | Full parameter log, per-group summary, and deglitch point counts |
+| `ASTRA_processing_report.txt` | Full parameter log, per-group summary, low-quality alignment count, warnings, and deglitch point counts |
+| `ASTRA_energy_shifts.dat` | Per-sample shift table: filename, base name, replicate id, assigned foil/reference, shift, alignment quality |
+| `ASTRA_foil_alignment.dat` | Per-foil or inline-reference alignment table: filename, shift, fit error, alignment quality |
 | `ASTRA_normalization_summary.dat` | Edge step, E₀, and normalization metadata per group |
 | `ASTRA_group_summary.dat` | Sample names, foil assignments, replicate counts |
 
-All `.dat` files have a commented header listing parameters and column names, and are directly loadable in the Spectrum Viewer.
+All `.dat` files have a commented header listing parameters and column names, and spectral `.dat` files are directly loadable in the Spectrum Viewer.
 
 ---
 
@@ -249,6 +280,8 @@ All processing parameters are exposed in the GUI and saveable as JSON config fil
 | `nnorm` | Normalization polynomial order (0, 1, or 2) |
 | `align_window_min/max` | Energy window used for foil alignment |
 | `shift_bound_min/max` | Maximum allowed energy shift during alignment (eV) |
+| `alignment_quality_warn_threshold` | Quality threshold below which alignment warnings are emitted; default `0.7` |
+| `alignment_grid_points` | Number of coarse-search grid points before local alignment refinement; default `50` |
 | `fluo_multiplicative_constant` | Scaling factor applied to IF before computing μ(E) |
 | `enable_auto_deglitch` | Interpolate isolated narrow detector spikes before merging |
 | `deglitch_threshold` | Robust local threshold for automatic spike detection |
@@ -261,8 +294,17 @@ All processing parameters are exposed in the GUI and saveable as JSON config fil
 | `outlier_rms_threshold` | RMS deviation threshold for outlier detection |
 | `enable_shift_rejection` | Exclude replicates with large energy shifts |
 | `reject_shift_abs_eV` | Shift threshold for rejection (eV) |
+| `save_detector_raw_overview_plot` | Save an overview plot of detector raw IF signal |
+| `save_processed_overview_plot` | Save an overview plot of merged processed μ(E) spectra |
+| `save_bkgcorr_overview_plot` | Save an overview plot of background-corrected spectra |
+| `save_norm_overview_plot` | Save an overview plot of normalized spectra |
+| `save_replicate_qc_plots` | Save per-group replicate QC plots |
+| `save_drift_plot` | Save `plots/drift_tracker.png` |
+| `plot_energy_min/max` | Energy range used for automatic overview and QC plots |
 
 In the GUI, the **Enable deglitching** checkbox and `automatic` / `manual` / `both` mode selector are translated into `enable_auto_deglitch` and `enable_manual_deglitch_range` in the saved configuration.
+
+The GUI defaults to `inline_ref` alignment because many ASTRA datasets include the reference channel in every scan. The `AstraConfig` dataclass default remains `separate_foil`, so scripts should set `alignment_source` explicitly when a specific workflow is required.
 
 Save a config file for each edge (Fe K, Cu K, etc.) and load it at the start of a session.
 
@@ -295,4 +337,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Acknowledgements
 
-AstraXAS uses [xraylarch](https://xraypy.github.io/xraylarch/) for Athena-compatible normalization via `pre_edge`. Alignment is based on derivative cross-correlation following the approach described in the [Athena User's Guide](https://bruceravel.github.io/demeter/documents/Athena/index.html).
+AstraXAS uses [xraylarch](https://xraypy.github.io/xraylarch/) for Athena-compatible normalization via `pre_edge`. Alignment follows the derivative-matching approach described in the [Athena User's Guide](https://bruceravel.github.io/demeter/documents/Athena/index.html), with added grid search, spline interpolation, and quality scoring in AstraXAS.
