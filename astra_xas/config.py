@@ -50,6 +50,7 @@ class AstraConfig:
 
     # Automatic plots. Avoid using "raw" for processed μ(E); true raw detector channels are separate.
     save_detector_health_overview_plot: bool = True
+    save_analysis_signal_qc_plot: bool = True
     save_detector_raw_overview_plot: bool = False
     save_processed_overview_plot: bool = True
     save_bkgcorr_overview_plot: bool = False

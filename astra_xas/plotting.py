@@ -229,3 +229,86 @@ def plot_detector_health_overview(
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     return {"path": output_path, "channels": included_channels, "skipped": skipped_channels}
+
+
+def plot_analysis_signal_qc(
+    records: list[dict],
+    output_path: str | Path,
+    signal_label: str,
+    title: str = "Analysis signal QC: individual scan traces before normalization",
+    energy_range: tuple[float, float] | None = None,
+) -> dict:
+    """Save individual analysis-signal traces and an optional diagnostic average."""
+    output_path = Path(output_path)
+    traces = []
+    skipped = []
+
+    for rec in records:
+        values = rec.get("signal")
+        label = rec.get("label", rec.get("filename", "scan"))
+        if values is None:
+            skipped.append(f"{label}: missing signal")
+            continue
+        x, y = _finite_xy(rec["energy"], values)
+        if energy_range is not None:
+            lo, hi = energy_range
+            mask = (x >= lo) & (x <= hi)
+            x, y = x[mask], y[mask]
+        if len(x) == 0:
+            skipped.append(f"{label}: no finite signal in plot range")
+            continue
+        traces.append((x, y, label))
+
+    if not traces:
+        return {"path": None, "signal": signal_label, "n_traces": 0, "skipped": skipped}
+
+    plt = _setup_matplotlib()
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for x, y, label in traces:
+        ax.plot(
+            x,
+            y,
+            linewidth=0.8,
+            alpha=0.55,
+            label=label if len(traces) <= 12 else None,
+        )
+
+    average_plotted = False
+    if len(traces) > 1:
+        master_x = traces[0][0]
+        interp_values = []
+        for x, y, _ in traces:
+            if len(x) < 2:
+                continue
+            y_interp = np.interp(master_x, x, y, left=np.nan, right=np.nan)
+            interp_values.append(y_interp)
+        if interp_values:
+            interp_array = np.asarray(interp_values, dtype=float)
+            valid_counts = np.sum(np.isfinite(interp_array), axis=0)
+            sums = np.nansum(interp_array, axis=0)
+            avg = np.full_like(master_x, np.nan, dtype=float)
+            valid_avg = valid_counts > 0
+            avg[valid_avg] = sums[valid_avg] / valid_counts[valid_avg]
+            valid = np.isfinite(master_x) & np.isfinite(avg)
+            if np.any(valid):
+                ax.plot(master_x[valid], avg[valid], color="black", linewidth=2.0, label="average", zorder=4)
+                average_plotted = True
+
+    ax.set_title(title)
+    ax.set_xlabel("Energy / eV")
+    ax.set_ylabel(signal_label)
+    ax.grid(True, alpha=0.25)
+    if len(traces) <= 12 or average_plotted:
+        ax.legend(fontsize=7, loc="best")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return {
+        "path": output_path,
+        "signal": signal_label,
+        "n_traces": len(traces),
+        "skipped": skipped,
+        "average_plotted": average_plotted,
+    }

@@ -12,7 +12,7 @@ from .signals import compute_signals, get_signal
 from .alignment import find_best_shift
 from .grouping import group_samples
 from .export import save_two_col
-from .plotting import plot_overview, plot_replicate_qc, plot_drift, plot_detector_health_overview
+from .plotting import plot_overview, plot_replicate_qc, plot_drift, plot_detector_health_overview, plot_analysis_signal_qc
 
 
 AUTO_DEGLITCH_WARNING = (
@@ -80,6 +80,15 @@ def _detector_health_channels(config: AstraConfig, records: list[dict]) -> list[
     if mode != "ref" and _records_have_channel(records, "mu_ref"):
         channels.append(("mu_ref", "ln(I1/I2)"))
     return channels
+
+
+def _analysis_signal_spec(config: AstraConfig) -> tuple[str, str]:
+    mode = getattr(config, "analysis_mode", "fluo")
+    if mode == "trans":
+        return "mu_trans", "ln(I0/I1)"
+    if mode == "ref":
+        return "mu_ref", "ln(I1/I2)"
+    return "mu_fluo", "IF/I0"
 
 
 def _safe_attr(group: Group, name: str, default=None):
@@ -353,6 +362,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
     replicate_qc_dir = plots_dir / "replicate_qc"
     plots_enabled = (
         getattr(config, "save_detector_health_overview_plot", True)
+        or getattr(config, "save_analysis_signal_qc_plot", True)
         or getattr(config, "save_detector_raw_overview_plot", False)
         or getattr(config, "save_processed_overview_plot", getattr(config, "save_raw_overview_plot", True))
         or getattr(config, "save_bkgcorr_overview_plot", False)
@@ -586,6 +596,7 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
     plot_files = []
     plot_energy_range = (config.plot_energy_min, config.plot_energy_max)
     detector_health_plot_info = {"path": None, "channels": [], "skipped": []}
+    analysis_signal_qc_info = {"path": None, "signal": "", "n_traces": 0, "skipped": []}
 
     if getattr(config, "save_detector_health_overview_plot", True):
         detector_health_records = [
@@ -611,6 +622,26 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         if detector_health_plot_info["path"] is not None:
             plot_files.append(detector_health_plot_info["path"])
             log(f"Saved plot: {detector_health_plot_info['path']}")
+
+    if getattr(config, "save_analysis_signal_qc_plot", True):
+        signal_key, signal_label = _analysis_signal_spec(config)
+        analysis_signal_records = [
+            {
+                "energy": s["energy"],
+                "signal": s.get(signal_key),
+                "label": s["filename"],
+            }
+            for s in sample_entries
+        ]
+        analysis_signal_qc_info = plot_analysis_signal_qc(
+            analysis_signal_records,
+            plots_dir / "analysis_signal_qc.png",
+            signal_label,
+            energy_range=plot_energy_range,
+        )
+        if analysis_signal_qc_info["path"] is not None:
+            plot_files.append(analysis_signal_qc_info["path"])
+            log(f"Saved plot: {analysis_signal_qc_info['path']}")
 
     if config.save_drift_plot:
         plots_dir = output_dir / "plots"
@@ -947,6 +978,22 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
                 f.write(f"Detector health overview: not created (no plottable channels; skipped: {skipped})\n")
         else:
             f.write("Detector health overview: disabled\n")
+        if getattr(config, "save_analysis_signal_qc_plot", True):
+            if analysis_signal_qc_info["path"] is not None:
+                skipped = "; ".join(analysis_signal_qc_info["skipped"]) or "None"
+                avg_status = "yes" if analysis_signal_qc_info.get("average_plotted") else "no"
+                f.write(
+                    f"Analysis signal QC: created "
+                    f"(signal: {analysis_signal_qc_info['signal']}; "
+                    f"individual traces: {analysis_signal_qc_info['n_traces']}; "
+                    f"average trace: {avg_status}; skipped/warnings: {skipped})\n"
+                )
+            else:
+                skipped = "; ".join(analysis_signal_qc_info["skipped"]) or "no plottable traces"
+                signal_name = analysis_signal_qc_info.get("signal") or _analysis_signal_spec(config)[1]
+                f.write(f"Analysis signal QC: not created (signal: {signal_name}; reason: {skipped})\n")
+        else:
+            f.write("Analysis signal QC: disabled\n")
         if getattr(config, "save_detector_raw_overview_plot", False):
             f.write("Aligned averaged IF overview: plots/aligned_averaged_IF_overview.png\n")
         else:

@@ -59,6 +59,7 @@ class AstraGui(tk.Tk):
         self.manual_deglitch_margin_points = tk.StringVar(value="5")
 
         self.plot_detector_health_overview = tk.BooleanVar(value=True)
+        self.plot_analysis_signal_qc = tk.BooleanVar(value=True)
         self.plot_detector_raw_overview = tk.BooleanVar(value=False)
         self.plot_processed_overview = tk.BooleanVar(value=True)
         self.plot_bkgcorr_overview = tk.BooleanVar(value=False)
@@ -383,36 +384,42 @@ class AstraGui(tk.Tk):
 
         ttk.Checkbutton(
             frame,
+            text="Analysis signal QC",
+            variable=self.plot_analysis_signal_qc,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
+
+        ttk.Checkbutton(
+            frame,
             text="Aligned averaged IF overview",
             variable=self.plot_detector_raw_overview,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
 
         ttk.Checkbutton(
             frame,
             text="Processed μ(E) overview",
             variable=self.plot_processed_overview,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
 
         ttk.Checkbutton(
             frame,
             text="Background-corrected overview",
             variable=self.plot_bkgcorr_overview,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=2)
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
 
         ttk.Checkbutton(
             frame,
             text="Normalized overview",
             variable=self.plot_norm_overview,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=2)
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
 
         ttk.Checkbutton(
             frame,
             text="Replicate QC plots",
             variable=self.plot_replicate_qc,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
 
         range_frame = ttk.Frame(frame)
-        range_frame.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        range_frame.grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         ttk.Label(range_frame, text="Plot energy range / eV").grid(row=0, column=0, sticky="w")
         ttk.Entry(range_frame, textvariable=self.plot_min, width=10).grid(row=0, column=1, padx=(8, 4))
@@ -654,6 +661,7 @@ class AstraGui(tk.Tk):
             manual_deglitch_max_energy=manual_deglitch_max_energy,
             manual_deglitch_margin_points=manual_deglitch_margin_points,
             save_detector_health_overview_plot=self.plot_detector_health_overview.get(),
+            save_analysis_signal_qc_plot=self.plot_analysis_signal_qc.get(),
             save_detector_raw_overview_plot=self.plot_detector_raw_overview.get(),
             save_processed_overview_plot=self.plot_processed_overview.get(),
             save_bkgcorr_overview_plot=self.plot_bkgcorr_overview.get(),
@@ -699,6 +707,7 @@ class AstraGui(tk.Tk):
             "manual_deglitch_max_energy": c.manual_deglitch_max_energy,
             "manual_deglitch_margin_points": c.manual_deglitch_margin_points,
             "save_detector_health_overview_plot": getattr(c, "save_detector_health_overview_plot", True),
+            "save_analysis_signal_qc_plot": getattr(c, "save_analysis_signal_qc_plot", True),
             "save_detector_raw_overview_plot": getattr(c, "save_detector_raw_overview_plot", False),
             "save_processed_overview_plot": getattr(c, "save_processed_overview_plot", True),
             "save_bkgcorr_overview_plot": getattr(c, "save_bkgcorr_overview_plot", False),
@@ -740,6 +749,7 @@ class AstraGui(tk.Tk):
             "manual_deglitch_max_energy": self.manual_deglitch_max_energy,
             "manual_deglitch_margin_points": self.manual_deglitch_margin_points,
             "save_detector_health_overview_plot": self.plot_detector_health_overview,
+            "save_analysis_signal_qc_plot": self.plot_analysis_signal_qc,
             "save_detector_raw_overview_plot": self.plot_detector_raw_overview,
             "save_processed_overview_plot": self.plot_processed_overview,
             "save_bkgcorr_overview_plot": self.plot_bkgcorr_overview,
