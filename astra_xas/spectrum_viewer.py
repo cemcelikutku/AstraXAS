@@ -225,7 +225,7 @@ def read_two_column_dat(path: str | Path) -> tuple[np.ndarray, np.ndarray, str]:
 class SpectrumViewer(tk.Toplevel):
     """Interactive viewer for processed ASTRA .dat spectra."""
 
-    def __init__(self, master=None):
+    def __init__(self, master=None, energy_range: tuple[float, float] | None = None):
         super().__init__(master)
         self.title("ASTRA Spectrum Viewer")
         self.geometry("1180x760")
@@ -234,8 +234,10 @@ class SpectrumViewer(tk.Toplevel):
         self.files: list[Path] = []
         self.labels: list[str] = []
 
-        self.e_min = tk.StringVar(value="7100.0")
-        self.e_max = tk.StringVar(value="7160.0")
+        if energy_range is None:
+            energy_range = (7100.0, 7160.0)
+        self.e_min = tk.StringVar(value=f"{float(energy_range[0]):.3f}")
+        self.e_max = tk.StringVar(value=f"{float(energy_range[1]):.3f}")
         self.use_smoothing = tk.BooleanVar(value=True)
         self.show_raw_too = tk.BooleanVar(value=False)
         self.plot_channel = tk.StringVar(value="auto")
@@ -886,8 +888,25 @@ class SpectrumViewer(tk.Toplevel):
             messagebox.showerror("Could not save plot", str(exc))
 
 
+def _viewer_energy_range_from_master(master) -> tuple[float, float] | None:
+    if master is None:
+        return None
+    plot_min = getattr(master, "plot_min", None)
+    plot_max = getattr(master, "plot_max", None)
+    if plot_min is None or plot_max is None:
+        return None
+    try:
+        e_min = float(plot_min.get())
+        e_max = float(plot_max.get())
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not e_min < e_max:
+        return None
+    return e_min, e_max
+
+
 def open_spectrum_viewer(master=None):
-    viewer = SpectrumViewer(master)
+    viewer = SpectrumViewer(master, energy_range=_viewer_energy_range_from_master(master))
     viewer.focus_set()
     return viewer
 
