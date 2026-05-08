@@ -17,6 +17,8 @@ from astra_xas.config import AstraConfig
 from astra_xas.io import load_xasd, natural_key
 from astra_xas.processor import _entry_from_scan, _validate_processing_inputs, detect_detector_jumps
 
+from .dashboard import render_dashboard
+from .plots import render_per_scan_plot
 from .session import append_session_row, write_session_ended_marker
 
 
@@ -132,13 +134,15 @@ def _count_detector_jumps(entry: dict, config: AstraConfig) -> int:
     return n_jumps
 
 
-def _process_scan(path: Path, config: AstraConfig, session_log: Path, log=print) -> None:
+def _process_scan(path: Path, config: AstraConfig, session_log: Path, output_dir: Path, log=print) -> None:
     timestamp = _timestamp()
     filename = path.name
     warnings: list[str] = []
     fatal_errors: list[str] = []
     n_jumps = 0
     notes = ""
+    entry = None
+    pipeline_succeeded = False
 
     try:
         scan = load_xasd(path)
@@ -157,6 +161,7 @@ def _process_scan(path: Path, config: AstraConfig, session_log: Path, log=print)
             },
         )
         log(f"{timestamp} {filename} status={status} warns=0 jumps=0")
+        render_dashboard(output_dir, log=log)
         return
 
     try:
@@ -175,6 +180,7 @@ def _process_scan(path: Path, config: AstraConfig, session_log: Path, log=print)
         if warnings:
             notes_parts.append("warnings: " + " | ".join(warnings))
         notes = "; ".join(notes_parts)
+        pipeline_succeeded = True
     except Exception as exc:
         status = "reject"
         notes = f"pipeline_failed: {type(exc).__name__}: {exc}"
@@ -192,6 +198,20 @@ def _process_scan(path: Path, config: AstraConfig, session_log: Path, log=print)
             "notes": notes,
         },
     )
+    if pipeline_succeeded:
+        plot_path = output_dir / "plots" / "beamtime" / f"{Path(filename).stem}.png"
+        plot_path.parent.mkdir(parents=True, exist_ok=True)
+        render_per_scan_plot(
+            entry,
+            config,
+            status,
+            len(warnings),
+            n_jumps,
+            timestamp,
+            plot_path,
+            log=log,
+        )
+    render_dashboard(output_dir, log=log)
     log(f"{timestamp} {filename} status={status} warns={len(warnings)} jumps={n_jumps}")
 
 
@@ -215,6 +235,8 @@ def watch(
     output_dir.mkdir(parents=True, exist_ok=True)
     session_dir = output_dir / "_astra_session"
     session_dir.mkdir(parents=True, exist_ok=True)
+    beamtime_plot_dir = output_dir / "plots" / "beamtime"
+    beamtime_plot_dir.mkdir(parents=True, exist_ok=True)
     session_log = output_dir / "ASTRA_beamtime_session.log"
     checkpoint_path = session_dir / "checkpoint.json"
     checkpoint = _load_checkpoint(checkpoint_path)
@@ -265,7 +287,7 @@ def watch(
                 continue
             try:
                 if not should_skip_checkpoint(path) and _wait_size_stable(path, log=log):
-                    _process_scan(path, config, session_log, log=log)
+                    _process_scan(path, config, session_log, output_dir, log=log)
                     try:
                         checkpoint["processed"][path.name] = _sha256_file(path)
                         _write_checkpoint(checkpoint_path, checkpoint)
@@ -302,6 +324,7 @@ def watch(
 
     while not file_queue.empty() and not stop_event.is_set():
         time.sleep(0.1)
+    render_dashboard(output_dir, log=log)
 
     try:
         while not stop_event.is_set():

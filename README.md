@@ -20,7 +20,7 @@ AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) pr
 - **Validation warnings** — reports missing/weak channels, incompatible modes, and energy-window issues before processing decisions are made
 - **Detector jump diagnostics** — optional diagnostic-only raw detector spike reporting with a structured `ASTRA_detector_jumps.dat` file
 - **Self-absorption flag** — optional fluorescence-mode heuristic that flags likely self-absorption when the fluorescence white-line amplitude is suppressed relative to simultaneously available sample transmission; QC flag only, no correction
-- **Beamtime Mode (preview)** — live per-scan QC as scans arrive in a watch folder, with a replay simulator for offline testing
+- **Beamtime Mode (preview)** — live per-scan QC as scans arrive in a watch folder, with per-scan plots, a live HTML dashboard, and a replay simulator for offline testing
 - **Detector raw export** — saves all raw detector channels (I0, I1, I2, IF, FDT, Ir) alongside processed outputs, plottable directly in the Spectrum Viewer
 - **Automatic plots** — detector health overview, analysis signal QC, processed μ(E), background-corrected, and normalized overview plots; pre-normalization and normalized replicate QC plots; optional energy drift tracker
 - **Edge presets** — editable starting templates for common ASTRA-accessible edges
@@ -244,9 +244,9 @@ This check uses point-to-point MAD thresholding plus recovery-window spike-vs-st
 
 ## Beamtime Mode (preview)
 
-Beamtime Mode is a headless preview workflow for live per-scan QC while `.xasd` files are being written during an experiment. The current scope is intentionally small: it watches a single incoming folder, validates each new scan, runs per-scan detector jump diagnostics, appends `ASTRA_beamtime_session.log`, and maintains a checkpoint for crash/restart recovery.
+Beamtime Mode is a headless preview workflow for live per-scan QC while `.xasd` files are being written during an experiment. The current scope is intentionally small: it watches a single incoming folder, validates each new scan, runs per-scan detector jump diagnostics, and maintains a session log, checkpoint-based crash recovery, per-scan QC plots, and a live HTML dashboard.
 
-This preview does not merge groups, normalize spectra, create QC plots, or provide a GUI panel yet. Those parts are planned for later releases.
+This preview does not merge groups, normalize spectra, or provide a GUI panel yet. Those parts are planned for later releases.
 
 Start a watch session with:
 
@@ -255,6 +255,8 @@ python -m astra_xas.beamtime watch /path/to/incoming
 ```
 
 By default, Beamtime Mode writes to `<incoming>-beamtime`. Use `-o / --output-dir` to choose another folder, or `-c / --config` to load an `AstraConfig` JSON file. The watcher considers only `.xasd` files directly inside the watched folder and ignores subdirectories.
+
+While the watcher is running, AstraXAS writes a per-scan QC plot under `<output_dir>/plots/beamtime/<scan>.png` and a live HTML dashboard at `<output_dir>/index.html` that auto-refreshes every five seconds. Open `index.html` in any browser to monitor scan-by-scan QC during a beamtime. The dashboard uses only relative paths, so it works over `file://` or via `python -m http.server` from the output directory.
 
 To test without a beamline, create your own synthetic source folder and replay it into a watch folder:
 
