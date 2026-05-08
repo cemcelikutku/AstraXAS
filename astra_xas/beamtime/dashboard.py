@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +23,12 @@ def _plot_rel_url(filename: str) -> str:
     return quote(rel.as_posix(), safe="/")
 
 
+def _rel_url(path: str) -> str:
+    return quote(Path(path).as_posix(), safe="/")
+
+
 def _status_class(status: str) -> str:
-    if status in {"ok", "warn", "reject"}:
+    if status in {"ok", "warn", "reject", "pending", "ready", "error"}:
         return status
     return ""
 
@@ -49,6 +54,64 @@ def _scan_row(row: dict, output_dir: Path) -> str:
             </div>"""
 
 
+def _read_group_summaries(output_dir: Path, log=print) -> list[dict]:
+    groups = []
+    groups_dir = output_dir / "groups"
+    if not groups_dir.exists():
+        return groups
+    for path in sorted(groups_dir.glob("*_group_summary.json")):
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                groups.append(data)
+        except Exception as exc:
+            log(f"WARNING: could not read beamtime group summary {path.name}: {exc}")
+    return sorted(groups, key=lambda item: str(item.get("last_updated_iso", "")), reverse=True)
+
+
+def _group_row(group: dict, output_dir: Path) -> str:
+    base_name = str(group.get("base_name", ""))
+    status = str(group.get("last_merge_status", "pending"))
+    output_files = group.get("output_files", {}) if isinstance(group.get("output_files", {}), dict) else {}
+    qc_rel = str(output_files.get("qc_plot", ""))
+    qc_path = output_dir / qc_rel if qc_rel else None
+    if qc_rel and qc_path is not None and qc_path.exists():
+        plot_html = (
+            f'<a href="{_rel_url(qc_rel)}">'
+            f'<img class="thumb" src="{_rel_url(qc_rel)}" alt="Group QC plot for {_esc(base_name)}"></a>'
+        )
+    else:
+        plot_html = '<span class="noplot">(no plot - group pending)</span>'
+    error = str(group.get("last_merge_error", ""))
+    error_html = f'<div class="noplot">{_esc(error)}</div>' if error else ""
+    return f"""
+            <div class="group-row">
+              <div class="filename">{_esc(base_name)}</div>
+              <div>{_esc(group.get("n_accepted", 0))}</div>
+              <div class="{_status_class(status)}">{_esc(status)}</div>
+              <div>{_esc(group.get("last_updated_iso", ""))}</div>
+              <div>{plot_html}{error_html}</div>
+            </div>"""
+
+
+def _groups_section(groups: list[dict], output_dir: Path) -> str:
+    if not groups:
+        return ""
+    rows = "\n".join(_group_row(group, output_dir) for group in groups)
+    return f"""
+  <h2>Live groups</h2>
+  <div class="group-row header">
+    <div>group</div>
+    <div>replicates</div>
+    <div>status</div>
+    <div>last updated</div>
+    <div>latest QC plot</div>
+  </div>
+{rows}
+"""
+
+
 def render_dashboard(
     output_dir: Path,
     max_recent: int = DASHBOARD_MAX_RECENT,
@@ -65,6 +128,7 @@ def render_dashboard(
         n_reject = sum(1 for row in rows if row.get("status") == "reject")
         now_iso = datetime.now().isoformat(timespec="seconds")
         row_html = "\n".join(_scan_row(row, output_dir) for row in recent)
+        group_html = _groups_section(_read_group_summaries(output_dir, log=log), output_dir)
         path = output_dir / "index.html"
         tmp = path.with_suffix(path.suffix + ".tmp")
         html_text = f"""<!DOCTYPE html>
@@ -82,6 +146,10 @@ def render_dashboard(
     .ok {{ color: #1a7f3a; }}
     .warn {{ color: #b07a00; }}
     .reject {{ color: #b03a3a; }}
+    .pending {{ color: #777; }}
+    .ready {{ color: #1a7f3a; }}
+    .error {{ color: #b03a3a; }}
+    h2 {{ font-size: 1.1rem; margin-top: 1.6rem; }}
     .row {{
       display: grid;
       grid-template-columns: 200px 1fr 110px 90px 90px;
@@ -90,7 +158,15 @@ def render_dashboard(
       border-bottom: 1px solid #eee;
       align-items: center;
     }}
-    .row.header {{ font-weight: 600; color: #555; }}
+    .group-row {{
+      display: grid;
+      grid-template-columns: 1fr 90px 110px 200px 320px;
+      gap: 0.6rem;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid #eee;
+      align-items: center;
+    }}
+    .row.header, .group-row.header {{ font-weight: 600; color: #555; }}
     img.thumb {{ max-width: 320px; height: auto; border: 1px solid #ddd; }}
     .filename {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9rem; }}
     .noplot {{ color: #888; font-style: italic; }}
@@ -108,6 +184,7 @@ def render_dashboard(
     <span class="warn">warn: <b>{n_warn}</b></span>
     <span class="reject">reject: <b>{n_reject}</b></span>
   </div>
+  <h2>Recent scans</h2>
   <div class="row header">
     <div>timestamp</div>
     <div>filename</div>
@@ -116,6 +193,7 @@ def render_dashboard(
     <div>jumps</div>
   </div>
 {row_html}
+{group_html}
   <p style="color:#888; margin-top:1.5rem; font-size:0.8rem;">
     AstraXAS Beamtime Mode (preview).
     Heuristic per-scan QC; this dashboard is informational.
