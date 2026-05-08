@@ -1,0 +1,12 @@
+# AstraXAS Beamtime Mode replay example.
+# Create your own source_dir with .xasd files first, then run:
+#   python -m astra_xas.beamtime replay examples/scenarios/clean_replay.yaml
+# In another terminal, watch the target folder:
+#   python -m astra_xas.beamtime watch /tmp/astra_beamtime_test
+source_dir: ./my_synthetic_scans
+target_dir: /tmp/astra_beamtime_test
+interval_s: 2.0
+jitter_s: 0.5
+shuffle: false
+seed: 42
+inject: []

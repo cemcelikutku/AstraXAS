@@ -20,6 +20,7 @@ AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) pr
 - **Validation warnings** — reports missing/weak channels, incompatible modes, and energy-window issues before processing decisions are made
 - **Detector jump diagnostics** — optional diagnostic-only raw detector spike reporting with a structured `ASTRA_detector_jumps.dat` file
 - **Self-absorption flag** — optional fluorescence-mode heuristic that flags likely self-absorption when the fluorescence white-line amplitude is suppressed relative to simultaneously available sample transmission; QC flag only, no correction
+- **Beamtime Mode (preview)** — live per-scan QC as scans arrive in a watch folder, with a replay simulator for offline testing
 - **Detector raw export** — saves all raw detector channels (I0, I1, I2, IF, FDT, Ir) alongside processed outputs, plottable directly in the Spectrum Viewer
 - **Automatic plots** — detector health overview, analysis signal QC, processed μ(E), background-corrected, and normalized overview plots; pre-normalization and normalized replicate QC plots; optional energy drift tracker
 - **Edge presets** — editable starting templates for common ASTRA-accessible edges
@@ -44,7 +45,7 @@ cd AstraXAS
 Install the required Python dependencies manually:
 
 ```bash
-pip install numpy scipy matplotlib xraylarch reportlab
+pip install numpy scipy matplotlib xraylarch reportlab watchdog PyYAML
 ```
 
 On Ubuntu, `tkinter` may need to be installed separately:
@@ -59,6 +60,7 @@ sudo apt install python3-tk
 - `xraylarch` — `pre_edge` normalization (Athena-compatible)
 - `matplotlib` — automatic and interactive plots
 - `reportlab` — optional PDF QC report generation
+- `watchdog`, `PyYAML` — Beamtime Mode folder watching and replay scenarios
 - `tkinter` — GUI toolkit
 
 ---
@@ -237,6 +239,42 @@ Warnings are printed in the processing log and written to a dedicated `Validatio
 When `enable_detector_jump_warnings=True`, AstraXAS runs a diagnostic-only detector jump check on raw detector channels after alignment shifts are known and before any deglitching or averaging. It can write `ASTRA_detector_jumps.dat` when spike-like jumps are detected, and it adds a conservative summary-level detector-jump count to `ASTRA_group_summary.dat`.
 
 This check uses point-to-point MAD thresholding plus recovery-window spike-vs-step discrimination, so monotonic absorption-edge-like steps are not treated as detector jumps. The detailed table can include primary raw-channel, FDT, and derived-signal sharp features, but the main processing report emphasizes significant primary raw-channel jumps (`I0`, `I1`, `I2`, `IF`) outside the edge/alignment window. FDT diagnostic spikes and derived-signal edge features are reported separately and excluded from the main summary. It never modifies detector arrays, processed spectra, normalized spectra, alignment shifts, or plot data.
+
+---
+
+## Beamtime Mode (preview)
+
+Beamtime Mode is a headless preview workflow for live per-scan QC while `.xasd` files are being written during an experiment. The current scope is intentionally small: it watches a single incoming folder, validates each new scan, runs per-scan detector jump diagnostics, appends `ASTRA_beamtime_session.log`, and maintains a checkpoint for crash/restart recovery.
+
+This preview does not merge groups, normalize spectra, create QC plots, or provide a GUI panel yet. Those parts are planned for later releases.
+
+Start a watch session with:
+
+```bash
+python -m astra_xas.beamtime watch /path/to/incoming
+```
+
+By default, Beamtime Mode writes to `<incoming>-beamtime`. Use `-o / --output-dir` to choose another folder, or `-c / --config` to load an `AstraConfig` JSON file. The watcher considers only `.xasd` files directly inside the watched folder and ignores subdirectories.
+
+To test without a beamline, create your own synthetic source folder and replay it into a watch folder:
+
+```python
+from pathlib import Path
+from astra_xas.beamtime._synthetic import write_synthetic_xasd
+
+source = Path("/tmp/astra_synthetic_source")
+source.mkdir(parents=True, exist_ok=True)
+for i in range(1, 6):
+    write_synthetic_xasd(source / f"scan_{i:03d}.xasd", seed=i)
+```
+
+Then edit `examples/scenarios/clean_replay.yaml` to point `source_dir` at that folder and run:
+
+```bash
+python -m astra_xas.beamtime replay examples/scenarios/clean_replay.yaml
+```
+
+The package does not ship example `.xasd` files. The synthetic generator is a software test fixture only; it is not physically accurate and should not be used as a reference spectrum.
 
 ---
 
@@ -532,6 +570,7 @@ Save a config file for each edge (Fe K, Cu K, etc.) and load it at the start of 
 | Replicate QC plots | Manual | ✗ | ✅ Automatic |
 | Outlier / shift rejection | ✗ | ✗ | ✅ Configurable |
 | Self-absorption flag | ✗ | ✗ | ✅ Heuristic QC flag (no correction) |
+| Live beamtime QC | ✗ | Limited | ✅ Watcher + replay simulator (preview) |
 | JSON config per edge | ✗ | ✗ | ✅ Save and load |
 | Python scripting API | ✗ | ✗ | ✅ `process_folder()` |
 | CLI | ✗ | ✗ | ✅ |
