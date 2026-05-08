@@ -39,7 +39,7 @@ cd AstraXAS
 Install the required Python dependencies manually:
 
 ```bash
-pip install numpy scipy matplotlib xraylarch
+pip install numpy scipy matplotlib xraylarch reportlab
 ```
 
 On Ubuntu, `tkinter` may need to be installed separately:
@@ -53,6 +53,7 @@ sudo apt install python3-tk
 - `numpy`, `scipy` — signal processing and alignment
 - `xraylarch` — `pre_edge` normalization (Athena-compatible)
 - `matplotlib` — automatic and interactive plots
+- `reportlab` — optional PDF QC report generation
 - `tkinter` — GUI toolkit
 
 ---
@@ -130,7 +131,8 @@ print(result["output_dir"])
          ├─ plots/replicate_qc/      (scan-to-scan replicate QC plots)
          ├─ ASTRA_energy_shifts.dat
          ├─ ASTRA_foil_alignment.dat
-         └─ ASTRA_processing_report.txt
+         ├─ ASTRA_processing_report.txt
+         └─ ASTRA_processing_and_QC_report.pdf
 ```
 
 ---
@@ -322,10 +324,13 @@ For each sample group, AstraXAS writes the following to the output directory:
 | `ASTRA_foil_alignment.dat` | Per-foil or inline-reference alignment table with alignment-anchor metadata: filename, shift, fit error, alignment quality |
 | `ASTRA_normalization_summary.dat` | Edge step, E₀, and normalization metadata per group |
 | `ASTRA_group_summary.dat` | Sample names, foil assignments, replicate counts |
+| `ASTRA_processing_and_QC_report.pdf` | Optional single-file processing and QC report with metadata, QC status, warnings, summary tables, and generated QC plots |
 
 All `.dat` files have a commented header listing parameters and column names, and spectral `.dat` files are directly loadable in the Spectrum Viewer. `ASTRA_energy_shifts.dat` and `ASTRA_foil_alignment.dat` include the alignment anchor context so shifts can be interpreted across folders.
 
 `ASTRA_processing_report.txt` separates `Validation warnings` from `Processing warnings`, reports processed μ(E) replicate QC and normalized replicate QC counts separately, and lists created plots under `Overview plots created` and `Replicate QC plots created`.
+
+When `save_pdf_report=True`, AstraXAS also writes `ASTRA_processing_and_QC_report.pdf`. The PDF collects run metadata, a compact QC status summary, validation and processing warnings, detector jump diagnostics, alignment/drift context, overview plots, replicate QC plots, main output-file locations, and compact previews of summary tables. It is diagnostic/reporting only: it uses already-created outputs and does not recompute or modify spectra. Missing plots or tables are skipped in the PDF as “not available”; processing still completes if PDF generation fails, and the failure is recorded in `ASTRA_processing_report.txt`.
 
 Note: `plots/detector_raw_overview.png` was the former name for the aligned averaged IF overview. Current runs write only `plots/overview/aligned_averaged_IF_overview.png`. The normalized replicate QC plot was formerly named `<sample>_replicate_qc.png`; current runs write `<sample>_normalized_replicate_qc.png`.
 
@@ -391,9 +396,10 @@ All processing parameters are exposed in the GUI and saveable as JSON config fil
 | `save_processed_mu_replicate_qc_plot` | Save pre-normalization processed μ(E) replicate QC plots; default `True` |
 | `save_replicate_qc_plots` | Save per-group replicate QC plots |
 | `save_drift_plot` | Save `plots/overview/drift_tracker.png` |
+| `save_pdf_report` | Generate `ASTRA_processing_and_QC_report.pdf`; default `True` when ReportLab is available |
 | `plot_energy_min/max` | Energy range used for automatic overview and QC plots |
 
-In the GUI, the **Enable deglitching** checkbox and `automatic` / `manual` / `both` mode selector are translated into `enable_auto_deglitch` and `enable_manual_deglitch_range` in the saved configuration.
+In the GUI, the **Enable deglitching** checkbox and `automatic` / `manual` / `both` mode selector are translated into `enable_auto_deglitch` and `enable_manual_deglitch_range` in the saved configuration. The **Generate PDF QC report** checkbox controls `save_pdf_report`.
 
 The GUI defaults to `inline_ref` alignment because many ASTRA datasets include the reference channel in every scan. The `AstraConfig` dataclass default remains `separate_foil`, so scripts should set `alignment_source` explicitly when a specific workflow is required.
 

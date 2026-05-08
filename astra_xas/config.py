@@ -65,6 +65,7 @@ class AstraConfig:
     save_raw_overview_plot: bool = False  # legacy alias only; do not use in new GUI
     save_drift_plot: bool = False
     save_foil_alignment_plots: bool = False
+    save_pdf_report: bool = True
 
     plot_energy_min: float = 7100.0
     plot_energy_max: float = 7160.0

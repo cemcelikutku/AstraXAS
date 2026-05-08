@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 from scipy.interpolate import CubicSpline, interp1d
@@ -771,6 +772,438 @@ def _detector_jump_energy_regions(records: list[dict]) -> str:
     else:
         regions.append(f"{start:.1f}-{prev:.1f} eV ({count})")
     return ", ".join(regions)
+
+
+def _short_pdf_text(value, limit: int = 80) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 3, 0)] + "..."
+
+
+def _read_dat_table_preview(path: Path, max_rows: int = 12, max_cols: int = 8) -> tuple[list[str], list[list[str]]]:
+    header: list[str] = []
+    rows: list[list[str]] = []
+    if not path.exists():
+        return header, rows
+
+    with path.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                clean = line.lstrip("#").strip()
+                if not clean or clean.startswith("="):
+                    continue
+                parts = clean.split("\t") if "\t" in clean else clean.split()
+                known_columns = {
+                    "output_base",
+                    "filename",
+                    "foil_filename",
+                    "energy_eV",
+                    "mean_edge_step",
+                    "shift_eV",
+                    "event_id",
+                }
+                if len(parts) > 1 and any(part in known_columns for part in parts):
+                    header = parts
+                continue
+
+            parts = line.split("\t") if "\t" in line else line.split()
+            if parts:
+                rows.append(parts)
+            if len(rows) >= max_rows:
+                break
+
+    if not header and rows:
+        header = [f"col{i + 1}" for i in range(len(rows[0]))]
+
+    if max_cols > 0:
+        def trim(parts: list[str]) -> list[str]:
+            if len(parts) <= max_cols:
+                return parts
+            return parts[:max_cols] + ["..."]
+
+        header = trim(header)
+        rows = [trim(row) for row in rows]
+
+    return header, rows
+
+
+def _read_detector_jump_pdf_summary(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    lines: list[str] = []
+    capture = False
+    with path.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.rstrip("\n")
+            if line.startswith("# GROUPED SIGNIFICANT EVENTS"):
+                break
+            if line.startswith("# SUMMARY"):
+                capture = True
+            if not capture:
+                continue
+            clean = line.lstrip("#").strip()
+            if not clean or clean.startswith("="):
+                continue
+            lines.append(clean)
+    return lines
+
+
+def _write_pdf_qc_report(output_path: Path, context: dict) -> None:
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        Image,
+        KeepTogether,
+        PageBreak,
+        Paragraph,
+        Preformatted,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    config = context["config"]
+    output_dir = Path(context["output_dir"])
+    overview_dir = Path(context["overview_dir"])
+    replicate_qc_dir = Path(context["replicate_qc_dir"])
+    alignment_anchor_info = context.get("alignment_anchor_info", {})
+
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=A4,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=36,
+        bottomMargin=36,
+    )
+    styles = getSampleStyleSheet()
+    styles["BodyText"].fontSize = 9
+    styles["BodyText"].leading = 11
+    styles["Heading1"].spaceAfter = 8
+    styles["Heading2"].spaceBefore = 6
+    styles["Heading2"].spaceAfter = 6
+    story = []
+
+    def para(text, style_name: str = "BodyText"):
+        safe = escape(str(text)).replace("\n", "<br/>")
+        return Paragraph(safe, styles[style_name])
+
+    def add_heading(text: str, level: int = 1) -> None:
+        story.append(para(text, f"Heading{level}"))
+        story.append(Spacer(1, 0.08 * inch))
+
+    def add_list(title: str, items: list[str], empty_text: str = "- None") -> None:
+        block = [para(title, "Heading3")]
+        if items:
+            for item in items[:25]:
+                block.append(para(f"- {item}"))
+            if len(items) > 25:
+                block.append(para(f"- ... {len(items) - 25} more"))
+        else:
+            block.append(para(empty_text))
+        block.append(Spacer(1, 0.08 * inch))
+        if len(block) <= 10:
+            story.append(KeepTogether(block))
+        else:
+            story.extend(block)
+
+    def add_key_value_table(rows: list[tuple[str, object]]) -> None:
+        data = [
+            [para(_short_pdf_text(key, 45)), para(value)]
+            for key, value in rows
+        ]
+        table = Table(data, colWidths=[2.05 * inch, doc.width - 2.05 * inch], hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f2f2f2")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 0.14 * inch))
+
+    def add_qc_status_box(status: str, findings: list[str]) -> None:
+        color = {
+            "Passed": colors.HexColor("#d8efe0"),
+            "Check recommended": colors.HexColor("#fff0c7"),
+            "Attention required": colors.HexColor("#f5d0cc"),
+        }.get(status, colors.HexColor("#eeeeee"))
+        findings_text = "<br/>".join(escape(f"- {finding}") for finding in findings) if findings else "- None"
+        data = [
+            [para("QC status", "Heading3"), para(status, "Heading3")],
+            [para("Main findings"), Paragraph(findings_text, styles["BodyText"])],
+        ]
+        table = Table(data, colWidths=[1.7 * inch, doc.width - 1.7 * inch], hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color),
+            ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#777777")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#999999")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(KeepTogether([table, Spacer(1, 0.16 * inch)]))
+
+    def add_image(path: Path, title: str, max_height: float = 4.6 * inch, caption: str | None = None) -> None:
+        story.append(para(title, "Heading3"))
+        if caption:
+            story.append(para(caption))
+        if not path.exists():
+            story.append(para("not available"))
+            story.append(Spacer(1, 0.08 * inch))
+            return
+        try:
+            image = Image(str(path))
+            scale = min(doc.width / image.imageWidth, max_height / image.imageHeight, 1.0)
+            image.drawWidth = image.imageWidth * scale
+            image.drawHeight = image.imageHeight * scale
+            story.append(image)
+        except Exception as exc:
+            story.append(para(f"not available ({exc})"))
+        story.append(Spacer(1, 0.12 * inch))
+
+    def add_table_preview(path: Path, title: str, max_rows: int = 12, max_cols: int = 7) -> None:
+        story.append(para(title, "Heading3"))
+        if not path.exists():
+            story.append(para("not available"))
+            story.append(Spacer(1, 0.08 * inch))
+            return
+        header, rows = _read_dat_table_preview(path, max_rows=max_rows, max_cols=max_cols)
+        if not rows:
+            story.append(para("not available or no data rows"))
+            story.append(Spacer(1, 0.08 * inch))
+            return
+        data = [[_short_pdf_text(cell, 28) for cell in header]]
+        data.extend([[_short_pdf_text(cell, 28) for cell in row] for row in rows])
+        col_width = doc.width / max(len(data[0]), 1)
+        table = Table(data, colWidths=[col_width] * len(data[0]), repeatRows=1, hAlign="LEFT")
+        table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e6edf5")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        story.append(table)
+        if len(rows) >= max_rows:
+            story.append(para(f"Showing first {max_rows} rows. See {path.name} for full table."))
+        else:
+            story.append(para(f"Full table available in {path.name}."))
+        story.append(Spacer(1, 0.12 * inch))
+
+    def replicate_plot_title(path: Path) -> str:
+        name = path.name
+        if name.endswith("_processed_mu_replicate_qc.png"):
+            sample = name.removesuffix("_processed_mu_replicate_qc.png")
+            return f"Processed μ(E) replicate QC: {sample}"
+        if name.endswith("_normalized_replicate_qc.png"):
+            sample = name.removesuffix("_normalized_replicate_qc.png")
+            return f"Normalized replicate QC: {sample}"
+        return path.stem.replace("_", " ")
+
+    jump_records = context.get("all_jump_records", [])
+    detector_jump_diagnostic = context.get("detector_jump_diagnostic", {"status": "disabled"})
+    summary_records = [record for record in jump_records if record.get("include_in_summary")]
+    fdt_count = sum(1 for record in jump_records if record.get("channel") in FDT_DETECTOR_JUMP_CHANNELS)
+    derived_count = sum(1 for record in jump_records if record.get("channel") in DERIVED_DETECTOR_JUMP_CHANNELS)
+    validation_warnings_pdf = context.get("validation_warnings", [])
+    processing_warnings_pdf = context.get("processing_warnings", [])
+    low_quality_count_pdf = int(context.get("low_quality_count", 0) or 0)
+    auto_deglitched_pdf = int(context.get("total_auto_deglitched_points", 0) or 0)
+    manual_interpolated_pdf = int(context.get("total_manual_range_interpolated_points", 0) or 0)
+    serious_terms = ("required channel", "no valid spectra", "failed", "error", "could not", "missing")
+    serious_validation = any(
+        "required channel" in str(warning).lower()
+        and ("missing" in str(warning).lower() or "no finite" in str(warning).lower())
+        for warning in validation_warnings_pdf
+    )
+    serious_processing = any(any(term in str(warning).lower() for term in serious_terms) for warning in processing_warnings_pdf)
+    if detector_jump_diagnostic.get("status") == "error" or low_quality_count_pdf > 0 or serious_validation or serious_processing:
+        qc_status = "Attention required"
+    elif (
+        validation_warnings_pdf
+        or processing_warnings_pdf
+        or summary_records
+        or auto_deglitched_pdf > 0
+        or manual_interpolated_pdf > 0
+        or detector_jump_diagnostic.get("status") == "found"
+    ):
+        qc_status = "Check recommended"
+    else:
+        qc_status = "Passed"
+
+    qc_findings = []
+    if validation_warnings_pdf:
+        first_validation = str(validation_warnings_pdf[0])
+        qc_findings.append(f"Validation warning: {_short_pdf_text(first_validation, 120)}")
+    else:
+        qc_findings.append("Validation warnings: none")
+    if summary_records:
+        qc_findings.append("Significant primary raw-channel detector jumps detected; see detector jump summary.")
+    else:
+        qc_findings.append("Detector jumps: no significant primary raw-channel jumps.")
+    if low_quality_count_pdf > 0:
+        qc_findings.append(f"Alignment quality: {low_quality_count_pdf} low-quality alignment(s).")
+    else:
+        qc_findings.append("Alignment quality: no low-quality alignments.")
+    if auto_deglitched_pdf or manual_interpolated_pdf:
+        qc_findings.append(
+            f"Deglitching/interpolation: {auto_deglitched_pdf} auto-deglitched point(s), "
+            f"{manual_interpolated_pdf} manually interpolated point(s)."
+        )
+    else:
+        qc_findings.append("Deglitching: no auto-deglitched or manually interpolated points.")
+
+    add_heading("AstraXAS Processing and QC Report")
+    story.append(para("Diagnostic report only. Spectra are not recomputed while building this PDF."))
+    story.append(Spacer(1, 0.14 * inch))
+    add_key_value_table([
+        ("ASTRA version", getattr(config, "version", "N/A")),
+        ("Input directory", context.get("input_dir", "")),
+        ("Output directory", output_dir),
+        ("Processing date/time", context.get("processing_datetime", "")),
+        ("Files found", context.get("files_found", "N/A")),
+        ("Analysis mode", getattr(config, "analysis_mode", "N/A")),
+        ("Alignment source", context.get("alignment_source", "N/A")),
+        ("Alignment signal", context.get("alignment_signal_label", "N/A")),
+        ("Alignment anchor mode", alignment_anchor_info.get("mode", "N/A")),
+        ("Alignment anchor file", alignment_anchor_info.get("path") or "N/A"),
+        ("E0", getattr(config, "e0", "N/A")),
+        ("Normalization order nnorm", getattr(config, "nnorm", "N/A")),
+        ("Auto-deglitching", _config_bool(config, "enable_auto_deglitch", False)),
+        ("Manual range deglitching", _config_bool(config, "enable_manual_deglitch_range", False)),
+        ("Output folders", "plots/overview; plots/replicate_qc; detector_raw"),
+    ])
+    add_qc_status_box(qc_status, qc_findings[:5])
+
+    add_heading("Warnings And Diagnostics", 2)
+    add_list("Validation warnings", validation_warnings_pdf)
+    add_list("Processing warnings", processing_warnings_pdf)
+    detector_status = detector_jump_diagnostic.get("status", "disabled")
+    if detector_status == "found":
+        detector_summary = [
+            f"Significant primary raw-channel jumps: {len(summary_records)}",
+            f"Full diagnostic entries: {len(jump_records)}",
+            f"FDT diagnostic spikes: {fdt_count}",
+            f"Derived-signal features excluded: {derived_count}",
+            "Full details: ASTRA_detector_jumps.dat",
+        ]
+    elif detector_status == "none":
+        detector_summary = ["None detected"]
+    elif detector_status == "error":
+        detector_summary = [f"Failed ({detector_jump_diagnostic.get('error', '')})"]
+    else:
+        detector_summary = ["Disabled"]
+    add_list("Detector jump diagnostics", detector_summary)
+    add_key_value_table([
+        ("Low-quality alignments", context.get("low_quality_count", 0)),
+        ("Auto-deglitched points", context.get("total_auto_deglitched_points", 0)),
+        ("Manually range-interpolated points", context.get("total_manual_range_interpolated_points", 0)),
+    ])
+
+    story.append(PageBreak())
+    add_heading("Alignment And Drift", 2)
+    add_key_value_table([
+        ("Alignment source", context.get("alignment_source", "N/A")),
+        ("Alignment signal", context.get("alignment_signal_label", "N/A")),
+        ("Alignment anchor mode", alignment_anchor_info.get("mode", "N/A")),
+        ("Alignment anchor status", alignment_anchor_info.get("status", "N/A")),
+    ])
+    story.append(para(f"Shift convention: {SHIFT_CONVENTION}"))
+    story.append(Spacer(1, 0.08 * inch))
+    add_image(overview_dir / "drift_tracker.png", "Drift tracker")
+
+    story.append(PageBreak())
+    add_heading("Detector QC", 2)
+    add_image(overview_dir / "detector_health_overview.png", "Detector health overview")
+    add_image(overview_dir / "analysis_signal_qc.png", "Analysis signal QC")
+    jump_summary_path = output_dir / "ASTRA_detector_jumps.dat"
+    jump_lines = _read_detector_jump_pdf_summary(jump_summary_path)
+    story.append(para("Detector jump summary", "Heading3"))
+    if jump_lines:
+        story.append(Preformatted("\n".join(jump_lines[:18]), styles["Code"]))
+        story.append(para("Full details: ASTRA_detector_jumps.dat"))
+    else:
+        story.append(para("not available"))
+
+    story.append(PageBreak())
+    add_heading("Spectrum Overview", 2)
+    add_image(overview_dir / "processed_mu_overview.png", "Processed mu(E) overview")
+    add_image(overview_dir / "background_corrected_overview.png", "Background-corrected overview")
+    add_image(overview_dir / "normalized_overview.png", "Normalized overview")
+    add_image(overview_dir / "aligned_averaged_IF_overview.png", "Aligned averaged IF detector signal")
+
+    story.append(PageBreak())
+    add_heading("Replicate QC", 2)
+    replicate_paths = sorted(replicate_qc_dir.glob("*_processed_mu_replicate_qc.png"))
+    replicate_paths.extend(sorted(replicate_qc_dir.glob("*_normalized_replicate_qc.png")))
+    if replicate_paths:
+        for idx, path in enumerate(replicate_paths):
+            add_image(
+                path,
+                replicate_plot_title(path),
+                max_height=3.8 * inch,
+                caption=f"File: {_relative_output_path(path, output_dir)}",
+            )
+            if (idx + 1) % 2 == 0 and idx + 1 < len(replicate_paths):
+                story.append(PageBreak())
+    else:
+        story.append(para("No replicate QC plots available."))
+
+    story.append(PageBreak())
+    add_heading("Main Output Files", 2)
+    main_outputs = [
+        "*_processed.dat",
+        "*_norm.dat",
+        "*_flat.dat, if created",
+        "detector_raw/*_detector_raw.dat",
+        "ASTRA_processing_report.txt",
+        "ASTRA_energy_shifts.dat",
+        "ASTRA_foil_alignment.dat, if created",
+        "ASTRA_normalization_summary.dat",
+        "plots/overview/",
+        "plots/replicate_qc/",
+    ]
+    if (output_dir / "ASTRA_detector_jumps.dat").exists():
+        main_outputs.insert(5, "ASTRA_detector_jumps.dat")
+    add_list("Main output files", main_outputs)
+
+    add_heading("Summary Tables", 2)
+    add_table_preview(output_dir / "ASTRA_normalization_summary.dat", "Normalization summary")
+    add_table_preview(output_dir / "ASTRA_energy_shifts.dat", "Energy shifts", max_rows=12, max_cols=8)
+    story.append(para("Detector jump diagnostic header", "Heading3"))
+    if jump_lines:
+        story.append(Preformatted("\n".join(jump_lines[:18]), styles["Code"]))
+    else:
+        story.append(para("not available"))
+
+    def draw_page_number(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.grey)
+        canvas.drawRightString(_doc.pagesize[0] - 36, 18, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=draw_page_number, onLaterPages=draw_page_number)
 
 
 def _entry_from_scan(scan: dict, config: AstraConfig, path: Path | None = None) -> dict:
@@ -1890,6 +2323,35 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         for path in relative_plot_files
         if not path.startswith("plots/overview/") and not path.startswith("plots/replicate_qc/")
     ]
+    processing_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pdf_report_status = {"status": "disabled", "path": None, "error": ""}
+    if getattr(config, "save_pdf_report", True):
+        pdf_path = output_dir / "ASTRA_processing_and_QC_report.pdf"
+        try:
+            _write_pdf_qc_report(pdf_path, {
+                "config": config,
+                "input_dir": input_dir,
+                "output_dir": output_dir,
+                "processing_datetime": processing_datetime,
+                "files_found": len(files),
+                "alignment_source": alignment_source,
+                "alignment_signal_label": alignment_signal_label,
+                "alignment_anchor_info": alignment_anchor_info,
+                "validation_warnings": validation_warnings,
+                "processing_warnings": warnings,
+                "detector_jump_diagnostic": detector_jump_diagnostic,
+                "all_jump_records": all_jump_records,
+                "low_quality_count": low_quality_count,
+                "total_auto_deglitched_points": total_auto_deglitched_points,
+                "total_manual_range_interpolated_points": total_manual_range_interpolated_points,
+                "overview_dir": overview_dir,
+                "replicate_qc_dir": replicate_qc_dir,
+            })
+            pdf_report_status = {"status": "created", "path": pdf_path, "error": ""}
+            log(f"Saved PDF QC report: {pdf_path}")
+        except Exception as exc:
+            pdf_report_status = {"status": "failed", "path": pdf_path, "error": str(exc)}
+            log(f"WARNING: PDF QC report failed: {exc}")
 
     with open(output_dir / "ASTRA_processing_report.txt", "w", encoding="utf-8") as f:
         f.write(f"{config.version}\n")
@@ -2063,6 +2525,12 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
             f.write(f"Other plots created: {len(other_plot_files)}\n")
             for plot_file in other_plot_files:
                 f.write(f"- {plot_file}\n")
+        if pdf_report_status["status"] == "created":
+            f.write(f"PDF QC report: created ({_relative_output_path(pdf_report_status['path'], output_dir)})\n")
+        elif pdf_report_status["status"] == "failed":
+            f.write(f"PDF QC report: failed ({pdf_report_status['error']})\n")
+        else:
+            f.write("PDF QC report: disabled\n")
         f.write("\nProcessing warnings:\n")
         if warnings:
             for w in warnings:
@@ -2084,4 +2552,5 @@ def process_folder(input_dir: str | Path, output_dir: str | Path | None = None, 
         "auto_outliers": len(auto_outlier_entries),
         "auto_deglitched_points": total_auto_deglitched_points,
         "manual_range_interpolated_points": total_manual_range_interpolated_points,
+        "pdf_report": pdf_report_status["path"] if pdf_report_status["status"] == "created" else None,
     }

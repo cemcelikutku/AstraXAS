@@ -76,6 +76,7 @@ class AstraGui(tk.Tk):
         self.plot_norm_overview = tk.BooleanVar(value=True)
         self.plot_processed_mu_replicate_qc = tk.BooleanVar(value=True)
         self.plot_replicate_qc = tk.BooleanVar(value=True)
+        self.save_pdf_report = tk.BooleanVar(value=True)
         # Backward-compatible internal alias. Do not expose as "raw" in the GUI.
         self.plot_raw_overview = self.plot_processed_overview
         self.plot_min = tk.StringVar(value="7100.0")
@@ -471,8 +472,14 @@ class AstraGui(tk.Tk):
             variable=self.plot_replicate_qc,
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=2)
 
+        ttk.Checkbutton(
+            frame,
+            text="Generate PDF QC report",
+            variable=self.save_pdf_report,
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=2)
+
         range_frame = ttk.Frame(frame)
-        range_frame.grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        range_frame.grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         ttk.Label(range_frame, text="Plot energy range / eV").grid(row=0, column=0, sticky="w")
         ttk.Entry(range_frame, textvariable=self.plot_min, width=10).grid(row=0, column=1, padx=(8, 4))
@@ -756,6 +763,7 @@ class AstraGui(tk.Tk):
             save_replicate_qc_plots=self.plot_replicate_qc.get(),
             save_drift_plot=self.save_drift_plot.get(),
             save_foil_alignment_plots=False,
+            save_pdf_report=self.save_pdf_report.get(),
             plot_energy_min=plot_min,
             plot_energy_max=plot_max,
         )
@@ -804,6 +812,7 @@ class AstraGui(tk.Tk):
             "save_processed_mu_replicate_qc_plot": getattr(c, "save_processed_mu_replicate_qc_plot", True),
             "save_replicate_qc_plots": c.save_replicate_qc_plots,
             "save_drift_plot": c.save_drift_plot,
+            "save_pdf_report": getattr(c, "save_pdf_report", True),
             "plot_energy_min": c.plot_energy_min,
             "plot_energy_max": c.plot_energy_max,
         }
@@ -851,6 +860,7 @@ class AstraGui(tk.Tk):
             "save_processed_mu_replicate_qc_plot": self.plot_processed_mu_replicate_qc,
             "save_replicate_qc_plots": self.plot_replicate_qc,
             "save_drift_plot": self.save_drift_plot,
+            "save_pdf_report": self.save_pdf_report,
             "plot_energy_min": self.plot_min,
             "plot_energy_max": self.plot_max,
         }
