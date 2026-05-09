@@ -123,20 +123,29 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 Then activate again. Once activated, you should see `(venv)` at
 the start of your prompt.
 
-### Step 5: Install dependencies
+### Step 5: Install AstraXAS
 
 With the venv activated:
 
 ```powershell
 pip install --upgrade pip
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 ```
 
-This installs `numpy`, `scipy`, `matplotlib`, `xraylarch`,
-`watchdog`, `pyyaml`, and `pytest`. The `xraylarch` install in
+The `-e` flag installs AstraXAS in editable mode, so any future
+`git pull` updates the package without reinstalling. The `[dev]`
+extra adds pytest for the verification step. This single command
+also pulls all runtime dependencies (`numpy`, `scipy`, `matplotlib`,
+`xraylarch`, `reportlab`, `watchdog`, `pyyaml`) declared in
+`pyproject.toml` automatically. The `xraylarch` install in
 particular can take a few minutes — it's a large package with
 many dependencies.
+
+Once installed, you get two command-line tools available
+system-wide inside the activated venv:
+
+- `astra-xas` — offline batch processing
+- `astra-xas-beamtime` — live watcher and replay simulator
 
 If any install fails, the most common Windows-specific cause is
 missing C++ build tools for some scientific package. The error
@@ -175,12 +184,16 @@ The most likely Windows-specific failure modes:
 ### Step 7: Verify the CLI works
 
 ```powershell
-python -m astra_xas.beamtime --help
-python -m astra_xas.beamtime watch --help
-python -m astra_xas.beamtime replay --help
+astra-xas --help
+astra-xas-beamtime --help
+astra-xas-beamtime watch --help
+astra-xas-beamtime replay --help
 ```
 
-All three should print help text without errors.
+All four should print help text without errors. The longer
+`python -m astra_xas.beamtime --help` form continues to work as
+an alternate invocation, but the short `astra-xas-beamtime`
+command is what the rest of this guide uses.
 
 ### Step 8: Do a dry run with synthetic data
 
@@ -195,7 +208,7 @@ Open **two PowerShell windows** (you'll need both later).
 ```powershell
 cd $HOME\AstraXAS
 .\venv\Scripts\Activate.ps1
-python -m astra_xas.beamtime watch C:\temp\astra_smoke_test
+astra-xas-beamtime watch C:\temp\astra_smoke_test
 ```
 
 This should start the watcher. It'll create
@@ -293,7 +306,7 @@ element (`s_k.json`, `cu_k.json`, etc.).
   Open a **new** terminal, or log out and back in.
 - **`pip install` fails with SSL errors**: Beamline networks
   sometimes have weird proxies. Try
-  `pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt`
+  `pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org -e ".[dev]"`
   or ask the beamline staff about proxy settings.
 - **Anti-virus blocking watchdog**: Some Windows endpoints flag
   filesystem watchers as suspicious. If the watcher seems to start
@@ -394,7 +407,7 @@ Both terminals need the venv activated.
 In **Terminal 1**:
 
 ```powershell
-python -m astra_xas.beamtime watch <DATA_DIR> `
+astra-xas-beamtime watch <DATA_DIR> `
     -c $HOME\astra_configs\p_k.json `
     -l $HOME\beamtime_logs\$(Get-Date -Format 'yyyy-MM-dd')_session1.log
 ```
@@ -482,7 +495,7 @@ existing watcher's config no longer applies.
 Terminal 1), restart with the new config:
 
 ```powershell
-python -m astra_xas.beamtime watch <DATA_DIR> `
+astra-xas-beamtime watch <DATA_DIR> `
     -c $HOME\astra_configs\cu_k.json `
     -l $HOME\beamtime_logs\$(Get-Date -Format 'yyyy-MM-dd')_session2.log
 ```
