@@ -33,7 +33,7 @@ AstraXAS provides automated workflows for X-ray absorption spectroscopy (XAS) pr
 
 ## Installation
 
-AstraXAS requires Python 3.10 or newer.
+AstraXAS requires Python 3.10 or newer. The package is tested on Linux and Windows. For a step-by-step Windows install procedure that covers common Windows-specific pitfalls (Microsoft Store Python alias, PowerShell vs CMD, virtual environment activation, etc.), see [BEAMTIME_USAGE.md](BEAMTIME_USAGE.md).
 
 ### From source (recommended for now)
 
@@ -275,6 +275,8 @@ This check uses point-to-point MAD thresholding plus recovery-window spike-vs-st
 Beamtime Mode is a headless preview workflow for live per-scan QC while `.xasd` files are being written during an experiment. The current scope is intentionally small: it watches a single incoming folder, validates each new scan, runs per-scan detector jump diagnostics, and maintains a session log, checkpoint-based crash recovery, per-scan QC plots, a live HTML dashboard, live group merge-normalize, and a Live groups dashboard section.
 
 This preview does not provide a GUI panel, foil drift correction, cross-scan alignment, automatic group outlier rejection, or the full offline `process_folder()` pipeline yet. Those parts are planned for later releases.
+
+For the full beamtime operating procedure — environment activation, watcher startup, dashboard monitoring, switching elements mid-session, end-of-session shutdown, output backup, and troubleshooting — see [BEAMTIME_USAGE.md](BEAMTIME_USAGE.md). That document also covers Windows-specific install steps if you're setting up on a beamline workstation.
 
 Start a watch session with:
 
